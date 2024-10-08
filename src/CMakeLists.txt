@@ -25,16 +25,16 @@
 ###############################################################################
 
 set(SOURCES
-	common.cu
-	common_device.cu
-	cpp_api.cu
-	#cutlass_mlp.cu
-	encoding.cu
-	loss.cu
-	network.cu
-	object.cu
-	optimizer.cu
-	reduce_sum.cu
+	common.cpp
+	common_device.cpp
+	cpp_api.cpp
+	#cutlass_mlp.cpp
+	encoding.cpp
+	loss.cpp
+	network.cpp
+	object.cpp
+	optimizer.cpp
+	reduce_sum.cpp
 )
 
 ###############################################################################

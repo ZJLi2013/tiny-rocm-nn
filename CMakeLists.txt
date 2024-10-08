@@ -33,7 +33,7 @@ project(
 	LANGUAGES CXX HIP
 )
 
-option(TCNN_BUILD_BENCHMARK "Build tiny-rocm-nn example benchmark?" ON)
+option(TCNN_BUILD_BENCHMARK "Build tiny-rocm-nn example benchmark?" OFF)
 option(TCNN_BUILD_EXAMPLES "Build tiny-rocm-nn example applications?" ON)
 
 ###############################################################################
