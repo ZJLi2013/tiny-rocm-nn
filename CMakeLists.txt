@@ -26,6 +26,8 @@ cmake_minimum_required(VERSION 3.18)
 # set(CMAKE_CXX_FLAGS_DEBUG "-O0")
 # set(CMAKE_HIP_FLAGS_DEBUG "-O0")
 
+set(CMAKE_CXX_COMPILER /opt/rocm/bin/hipcc) 
+
 project(
 	tiny-rocm-nn
 	VERSION 1.0
@@ -65,8 +67,11 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 ###############################################################################
 # Find ROCm packages
 find_package(hip REQUIRED)
+find_package(hiprtc REQUIRED )
 find_package(rocblas REQUIRED)
-find_package(rocwmma REQUIRED)
+set(CMAKE_PREFIX_PATH "/opt/rocm/include/rocwmma")
+# Could not find a package configuration file provided by "rocwmma" with rocwmmaConfig.cmake
+# find_package(rocwmma REQUIRED)
 
 # Include directories
 include_directories(${HIP_INCLUDE_DIRS})
@@ -112,7 +117,7 @@ target_include_directories(tiny-rocm-nn PUBLIC
 	"dependencies"
 	"dependencies/fmt/include"
 )
-target_link_libraries(tiny-rocm-nn PUBLIC hip::hip_runtime roc::rocblas rocwmma::rocwmma fmt)
+target_link_libraries(tiny-rocm-nn PUBLIC hip::device hip::host roc::rocblas fmt)
 
 if (TCNN_BUILD_EXAMPLES)
 	add_subdirectory("samples")

@@ -42,4 +42,4 @@ set(SOURCES
 ###############################################################################
 
 add_library(tiny-cuda-nn STATIC ${SOURCES})
-target_link_libraries(tiny-cuda-nn PUBLIC hip::hip_runtime roc::rocblas rocwmma::rocwmma fmt)
+target_link_libraries(tiny-cuda-nn PUBLIC hip::device hip::host roc::rocblas fmt)
