@@ -1,3 +1,7 @@
+[submodule "dependencies/rocwmma"]
+	path = dependencies/rocwmma
+	url = https://github.com/ROCm/rocWMMA.git
+
 [submodule "dependencies/fmt"]
-	path = dependencies/fmt
-	url = https://github.com/fmtlib/fmt
+  	path = dependencies/fmt
+    	url = https://github.com/fmtlib/fmt.git
