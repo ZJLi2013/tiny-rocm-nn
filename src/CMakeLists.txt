@@ -26,10 +26,11 @@
 
 set(SOURCES
 	common.cpp
-	common_device.cpp
+	common_host.cpp 
 	cpp_api.cpp
 	#cutlass_mlp.cpp
 	encoding.cpp
+	fully_fused_mlp.cpp
 	loss.cpp
 	network.cpp
 	object.cpp
@@ -41,5 +42,5 @@ set(SOURCES
 # Linker / library
 ###############################################################################
 
-add_library(tiny-cuda-nn STATIC ${SOURCES})
-target_link_libraries(tiny-cuda-nn PUBLIC hip::device hip::host roc::rocblas fmt)
+add_library(tiny-rocm-nn STATIC ${SOURCES})
+target_link_libraries(tiny-rocm-nn PUBLIC hip::device hip::host roc::rocblas fmt)

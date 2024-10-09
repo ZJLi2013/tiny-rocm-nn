@@ -66,12 +66,13 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # Setup ROCm dependencies  
 ###############################################################################
 # Find ROCm packages
+set(ROCM_ROOT_DIR "/opt/rocm/")
+set(ROCM_INCLUDE_DIR "/opt/rocm/include/")
+set(ROCWMMA_PATH "${ROCM_INCLUDE_DIR}/rocwmma/")
+set(ROCBLAS_PATH "${ROCM_INCLUDE_DIR}/rocblas/" )
 find_package(hip REQUIRED)
 find_package(hiprtc REQUIRED )
 find_package(rocblas REQUIRED)
-set(CMAKE_PREFIX_PATH "/opt/rocm/include/rocwmma")
-# Could not find a package configuration file provided by "rocwmma" with rocwmmaConfig.cmake
-# find_package(rocwmma REQUIRED)
 
 # Include directories
 include_directories(${HIP_INCLUDE_DIRS})
@@ -116,6 +117,8 @@ target_include_directories(tiny-rocm-nn PUBLIC
 	"include"
 	"dependencies"
 	"dependencies/fmt/include"
+	${ROCWMMA_PATH}
+	${ROCBLAS_PATH}
 )
 target_link_libraries(tiny-rocm-nn PUBLIC hip::device hip::host roc::rocblas fmt)
 

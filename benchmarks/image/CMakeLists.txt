@@ -21,4 +21,4 @@
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 add_executable(bench_image_ours bench_ours.cu ../../dependencies/stbi/stbi_wrapper.cpp)
-target_link_libraries(bench_image_ours PUBLIC tiny-cuda-nn)
+target_link_libraries(bench_image_ours PUBLIC tiny-rocm-nn)
