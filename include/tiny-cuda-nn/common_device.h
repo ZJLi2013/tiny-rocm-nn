@@ -337,9 +337,10 @@ __host__ __device__ void activation_backward_kernel(Activation activation, fragm
 				}
 				return;
 			case Activation::Sine:
-				// Sine requires stored pre-activations, which we don't have. We only
-				// write out the post-activations.
-				// assert(false); // Commented out due to isolated strange side-effects on Windows
+				TCNN_PRAGMA_UNROLL
+				for (int t=0; t < kCount; t++) {
+					result[idx].x[t] = frag[idx].x[t] * (T)(cosf(forward_frag[idx].x[t]));
+				}
 				return;
 			case Activation::Sigmoid:
 				TCNN_PRAGMA_UNROLL
@@ -404,9 +405,10 @@ __host__ __device__ void warp_activation_backward(Activation activation, const f
 			}
 			return;
 		case Activation::Sine:
-			// Sine requires stored pre-activations, which we don't have. We only
-			// write out the post-activations.
-			// assert(false); // Commented out due to isolated strange side-effects on Windows
+			TCNN_PRAGMA_UNROLL
+			for (int t=0; t < result.num_elements; t++) {
+				result.x[t] = frag.x[t] * (T)(cosf(forward_frag_in.x[t]));
+			}
 			return;
 		case Activation::Sigmoid:
 			TCNN_PRAGMA_UNROLL

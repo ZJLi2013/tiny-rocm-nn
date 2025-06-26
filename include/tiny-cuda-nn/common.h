@@ -38,6 +38,7 @@
 #include <cstdint>
 #include <type_traits>
 #include <string> 
+#include <stdexcept>
 
 #if defined(__CUDACC__)
 #  include <cuda_fp16.h>

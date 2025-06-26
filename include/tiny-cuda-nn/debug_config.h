@@ -2,7 +2,7 @@
 #ifndef DEBUG_CONFIG_H
 #define DEBUG_CONFIG_H
 
-#define DEBUG_MODE 1
+#define DEBUG_MODE 0
 #include <iostream>
 
 template<typename T>

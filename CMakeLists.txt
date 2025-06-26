@@ -54,6 +54,9 @@ endif()
 if (MSVC)
 	set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /D_CRT_SECURE_NO_WARNINGS")
 	set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /MP")
+else()
+	# Explicitly set C++14 standard for non-MSVC compilers
+	set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++14")
 endif()
 
 set(CMAKE_CXX_STANDARD 14)
@@ -119,6 +122,11 @@ set(CMAKE_CUDA_STANDARD 14)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_EXTENSIONS OFF)
 set(CUDA_LINK_LIBRARIES_KEYWORD PUBLIC)
+
+# Explicitly add CUDA standard flags
+if (NOT MSVC)
+	set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -std=c++14")
+endif()
 
 get_directory_property(TCNN_HAS_PARENT PARENT_DIRECTORY)
 if (DEFINED ENV{TCNN_CUDA_ARCHITECTURES})
