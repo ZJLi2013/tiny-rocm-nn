@@ -297,16 +297,26 @@ void OurSplitGemm(cublasHandle_t handle,
         const T* B_slice;
         const T* A_slice;   
         int k_slice = k / split_k_slices;
+        
+        // Constants for accumulation
+        float one_f = 1.0f;
+        __half one_h = __float2half(1.0f);
+        
         for (int slice = 0; slice < split_k_slices; ++slice) {
             //TODO: data access consider layout 
             A_slice = static_cast<const T*>(A) + slice * k_slice;
             B_slice = static_cast<const T*>(B) + slice * k_slice * ldb;
+
+            // For first slice use original beta, for others use 1.0 for accumulation
+            const void* slice_beta = (slice == 0) ? beta : (std::is_same<T, float>::value ? 
+                static_cast<const void*>(&one_f) : static_cast<const void*>(&one_h));
+
             cublasStatus_t status = cublasGemmEx(handle, TransA, TransB,
                                                 m, n, k_slice,
                                                 alpha,
                                                 A_slice, dataType, lda,
                                                 B_slice, dataType, ldb,
-                                                beta,
+                                                slice_beta,
                                                 C, dataType, ldc,
                                                 dataType, 
                                                 CUBLAS_GEMM_DEFAULT);
@@ -460,14 +470,29 @@ void fc_multiply_split_k(cublasHandle_t handle, cudaStream_t stream, const GPUMa
     if (TransC == CUBLAS_OP_N) {  // col-major in cublas, then use output C correctly 
         OurSplitGemm<network_precision_t>(handle, TransA, TransB, M, N, K, &alpha, A.data(), lda, B.data(), ldb, &half_beta, C.data(), ldc, split_k_slices); 
     } else if (TransC == CUBLAS_OP_T) {
-        // as the memory for output C as row-major, while cublas consider C in col-major by default 
-        printf("[DEBUG], matC is pre-allocated as row-major in memory, while cublas consider C in col-major. running memory layout convert here\n");
-        network_precision_t *C2; 
-        CUDA_CHECK_THROW(cudaMalloc((void**)&C2, C.rows() * C.cols() * sizeof(network_precision_t))); // interpret C2 as col-major
-        int ldc2 = C.rows(); 
-        OurSplitGemm<network_precision_t>(handle, TransA, TransB, M, N, K, &alpha, A.data(), lda, B.data(), ldb, &half_beta, C2, ldc2, split_k_slices); 
-        convertColumnMajorToRowMajor_GPU(C2, C.data(), C.rows(), C.cols()); 
-        CUDA_CHECK_THROW(cudaFree(C2));
+        // Robust solution for row-major output
+        // Use the original matrices with their original layouts
+        // but compute into a temporary column-major buffer
+        network_precision_t *C_temp;
+        size_t c_size = C.rows() * C.cols() * sizeof(network_precision_t);
+        CUDA_CHECK_THROW(cudaMalloc((void**)&C_temp, c_size));
+        int ldc_temp = C.rows();  // Leading dimension for column-major storage
+        
+        // Compute GEMM in column-major format
+        OurSplitGemm<network_precision_t>(handle, TransA, TransB, 
+                                          M, N, K, 
+                                          &alpha, 
+                                          A.data(), lda, 
+                                          B.data(), ldb, 
+                                          &half_beta, 
+                                          C_temp, ldc_temp, 
+                                          split_k_slices);
+        
+        // Convert from column-major to row-major
+        convertColumnMajorToRowMajor_GPU(C_temp, C.data(), C.rows(), C.cols());
+        
+        // Clean up temporary buffer
+        CUDA_CHECK_THROW(cudaFree(C_temp));
     }
 }
 

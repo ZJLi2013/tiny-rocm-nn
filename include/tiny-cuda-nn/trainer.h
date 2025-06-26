@@ -111,9 +111,6 @@ public:
 		auto forward = std::make_unique<ForwardContext>();
 
 		forward->output = GPUMatrix<COMPUTE_T>{m_model->padded_output_width(), batch_size, stream};
-#ifdef DEBUG_MODE 
-		(forward->output).print_matrix("trainer_forward_initial_output.log");
-#endif 
 		forward->model_ctx = m_model->forward(stream, input, &forward->output, use_inference_params, prepare_input_gradients);
 
 		if (m_perturbation_sigma > 0) {
@@ -141,11 +138,6 @@ public:
 			forward->dL_doutput = GPUMatrix<COMPUTE_T>{m_model->padded_output_width(), batch_size, stream};
 			m_loss->evaluate(stream, loss_scale, loss_input, target, forward->L, forward->dL_doutput, data_pdf);
 		}
-
-#if DEBUG_MODE
-	forward->output.print_matrix("trainer_forward_ctx_output.log");
-	forward->dL_doutput.print_matrix("trainer_forward_ctxdL_doutput.log");
-#endif 
 
 		return forward;
 	}
@@ -187,12 +179,6 @@ public:
 		std::unique_ptr<ForwardContext> ctx;
 		{
 			// Execute forward and backward in a CUDA graph for maximum performance.
-#if DEBUG_MODE 
-			// TODO: disable cuda graph capture for print_matrix !
-			// auto capture_guard = m_graph.capture_guard(stream);
-			input.print_matrix("training_step_forward_input.log"); 
-			target.print_matrix("training_step_forward_target.log"); 
-#endif 
 			ctx = forward(stream, loss_scale, input, target, data_pdf, use_inference_params, dL_dinput, external_dL_dy);
 			backward(stream, *ctx, input, dL_dinput, use_inference_params, param_gradients_mode);
 		}

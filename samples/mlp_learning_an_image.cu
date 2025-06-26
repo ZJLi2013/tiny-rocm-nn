@@ -113,12 +113,8 @@ int main(int argc, char* argv[]) {
 			return 0;
 		}
 
-#ifdef DEBUG_MODE 
-	uint32_t n_hidden_layers = 1 ;
-#else 
 	uint32_t n_hidden_layers = 4 ; 
-#endif 
-	
+
 		json config = {
 			{"loss", {
 				{"otype", "RelativeL2"}
