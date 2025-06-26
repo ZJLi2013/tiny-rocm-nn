@@ -27,41 +27,17 @@ namespace tcnn {
 using TypeAccumulator = std::conditional_t<std::is_same<network_precision_t, float>::value, float, __half>;
 using TypeCompute = std::conditional_t<std::is_same<network_precision_t, float>::value, float, __half>;
 
-template <typename V, int Count>
-struct CublasFragmentWrapper {
-	static const uint32_t num_elements = Count;
-	V x[Count];
-};
+// Forward declarations of kernel functions
+template <typename ElementAccumulator, int kCount, typename Activation>
+__global__ void fused_activation_kernel(Activation activation, ElementAccumulator* matrix, int num_elements);
 
-template<typename ElementAccumulator, typename MyFragment, int kCount>
-__global__ void create_fragments(ElementAccumulator* matrixC,  MyFragment* d_fragments, int m, int n){
-    int idx = blockIdx.x * blockDim.x + threadIdx.x ;
-    int offset = idx * kCount ;
-    if(offset < m *n){
-        TCNN_PRAGMA_UNROLL
-        for(int i=0; i<kCount ; ++i){
-            int element_idx = offset + i ;
-            if(element_idx < m*n){
-                d_fragments[idx].x[i] = matrixC[element_idx]; 
-            }
-        }
-    }
-}
-
-template<typename ElementAccumulator, typename MyFragment, int kCount>
-__global__ void merge_fragments(MyFragment* d_fragments, ElementAccumulator* matrixC,  int m, int n){
-    int idx = blockIdx.x * blockDim.x + threadIdx.x ;
-    int offset = idx * kCount ;
-    if(offset < m *n ){
-        TCNN_PRAGMA_UNROLL
-        for(int i=0; i<kCount; ++i){
-            int element_idx = offset + i ;
-            if( element_idx < m*n){
-                matrixC[element_idx] = d_fragments[idx].x[i]; 
-            }
-        }
-    }       
-}
+template <typename ElementAccumulator, int kCount, typename Activation>
+__global__ void fused_activation_backward_kernel(
+    Activation activation, 
+    ElementAccumulator* gradient, 
+    ElementAccumulator* source, 
+    int num_elements
+);
 
 template <
 	typename ElementOutput_,                             ///< Data type used to load and store tensors
@@ -74,40 +50,59 @@ public:
 	using ElementOutput = ElementOutput_;
 	using ElementAccumulator = ElementAccumulator_;
 	using ElementCompute = ElementCompute_;
-    static int const kCount = Count ; 
+    static int const kCount = Count; 
 	struct Params {
 		Activation activation;
 		bool sum_source;
 	};
 public:
-	ActivationEpilogue(Params const &params) : m_activation{params.activation}, m_sum_source{params.sum_source} { }
-	bool is_source_needed() const {
+	ActivationEpilogue(Params const &params = {Activation::None, false}) 
+        : m_activation{params.activation}, m_sum_source{params.sum_source} { }
+	
+    bool is_source_needed() const {
 		return m_sum_source;
 	}
-    using MyFragment = CublasFragmentWrapper<ElementAccumulator, kCount> ;
-    ElementOutput operator()(ElementAccumulator* accumulator, int m, int n) const {
-            int threads_per_block = 256 ;
-            int total_threads = ( m *n + kCount - 1) / kCount; 
-            int blocks = (total_threads + threads_per_block -1) / threads_per_block ;
-            // Temp Solution 
-            MyFragment* d_fragments ; 
-            int num_fragments =  ( m *n + kCount - 1) / kCount; 
-            cudaMalloc(&d_fragments, num_fragments * sizeof(MyFragment));
-            create_fragments<ElementAccumulator, MyFragment, kCount>(accumulator, d_fragments, m, n); 
-            activation_kernel<ElementAccumulator, MyFragment, kCount><<<blocks, threads_per_block>>>(m_activation, d_fragments, m, n); 
-            cudaStreamSynchronize(0); 
-            merge_fragments<ElementAccumulator, MyFragment, kCount>(d_fragments, accumulator, m, n);
-            cudaFree(d_fragments);
+    
+    // Fused activation kernel (no temporary allocations)
+    __device__ __forceinline__ ElementAccumulator apply_activation(ElementAccumulator value) const {
+        switch (m_activation) {
+            case Activation::None:     return value;
+            case Activation::ReLU:     return value > 0 ? value : 0;
+            case Activation::Exponential: return expf(value);
+            case Activation::Sine:     return sinf(value);
+            case Activation::Sigmoid:  return 1.0f / (1.0f + expf(-value));
+            case Activation::Squareplus: return 0.5f * (value + sqrtf(value * value + 4));
+            case Activation::Softplus: return logf(1.0f + expf(value));
+            default: return value;
+        }
+    }
+    
+    // Optimized fused GEMM + activation operator
+    void operator()(ElementAccumulator* accumulator, int m, int n) const {
+        const int total_elements = m * n;
+        const int threads_per_block = 256;
+        const int blocks = (total_elements + threads_per_block - 1) / threads_per_block;
+        
+        // Launch fused kernel with proper thread indexing
+        fused_activation_kernel<ElementAccumulator, kCount>
+            <<<blocks, threads_per_block>>>(m_activation, accumulator, total_elements);
+        cudaStreamSynchronize(0);
     } 
 
-    ElementOutput operator()(ElementAccumulator* accumulator, ElementOutput* source,  int m, int n) const {
-        std::cout << "NOT Implement in ActivationEpilogue" << std::endl ;
+    // Backward pass implementation
+    void operator()(ElementAccumulator* accumulator, ElementOutput* source, int m, int n) const {
+        const int total_elements = m * n;
+        const int threads_per_block = 256;
+        const int blocks = (total_elements + threads_per_block - 1) / threads_per_block;
+        
+        fused_activation_backward_kernel<ElementAccumulator, kCount>
+            <<<blocks, threads_per_block>>>(m_activation, accumulator, source, total_elements);
+        cudaStreamSynchronize(0);
     } 
 
 private:
 	Activation m_activation;
 	bool m_sum_source;
-
 }; 
 
 template <
@@ -121,61 +116,43 @@ public:
 	using ElementOutput = ElementOutput_;
 	using ElementAccumulator = ElementAccumulator_;
 	using ElementCompute = ElementCompute_;
-
-    static int const kCount = Count ; 
-
-    using FragmentOutput = std::array<ElementOutput_, kCount>; 
-	using FragmentAccumulator = std::array<ElementAccumulator, kCount>;
-	using ComputeFragment = std::array<ElementCompute, kCount>;   
+    static int const kCount = Count; 
 
 	struct Params {
 		Activation activation;
 	};
 public:
-	ActivationTransferEpilogue(Params const &params) : m_activation{params.activation} { }
+	ActivationTransferEpilogue(Params const &params = {Activation::None}) 
+        : m_activation{params.activation} { }
 
 	bool is_source_needed() const {
 		return true;
 	}
 
-    using MyFragment = CublasFragmentWrapper<ElementAccumulator, kCount> ;
-    /*
-        accumulator :: dL/da at each layer during backward pass  
-        source :: input for activation_Op at each layer during forward pass 
-        TODO: what's and how accumulator, source passed into this epilogue after cublas::gemm done ?
-    */
-    ElementOutput operator()(ElementAccumulator* accumulator, ElementOutput* source, int m, int n) const {
-            int threads_per_block = 256 ;
-            int total_threads = ( m *n + kCount - 1) / kCount; 
-            int blocks = (total_threads + threads_per_block -1) / threads_per_block ;
-            // Temp Solution 
-            MyFragment* a_fragments ; 
-            MyFragment* s_fragments; 
-            int num_fragments =  ( m *n + kCount - 1) / kCount; 
-            CUDA_CHECK_THROW(cudaMalloc(&a_fragments, num_fragments * sizeof(MyFragment)));
-            CUDA_CHECK_THROW(cudaMalloc(&s_fragments, num_fragments * sizeof(MyFragment))); 
-            create_fragments<ElementAccumulator, MyFragment, kCount>(accumulator, a_fragments, m, n); 
-            create_fragments<ElementOutput, MyFragment, kCount>(source, s_fragments, m, n); 
-            activation_backward_kernel<ElementAccumulator, MyFragment, kCount><<<blocks, threads_per_block>>>(m_activation, a_fragments, m, n); 
-            cudaStreamSynchronize(0); 
-            merge_fragments<ElementAccumulator, MyFragment, kCount>(a_fragments, accumulator, m, n);
-            // s_fragments is used as const only for activaton_backward_kernel, so direct delete once done 
-            CUDA_CHECK_THROW(cudaFree(a_fragments));
-            CUDA_CHECK_THROW(cudaFree(s_fragments));
-    }    
+    // Optimized implementation that directly applies activation derivative
+    void operator()(ElementAccumulator* gradient, ElementOutput* source, int m, int n) const {
+        const int total_elements = m * n;
+        const int threads_per_block = 256;
+        const int blocks = (total_elements + threads_per_block - 1) / threads_per_block;
+        
+        fused_activation_backward_kernel<ElementAccumulator, kCount>
+            <<<blocks, threads_per_block>>>(m_activation, gradient, source, total_elements);
+        cudaStreamSynchronize(0);
+    }
 
-    ElementOutput operator()(ElementAccumulator* accumulator, int m , int n ){
-        std::cout << "NOT Implement 2" << std::endl; 
+    void operator()(ElementAccumulator* accumulator, int m, int n) const {
+        std::cout << "ActivationTransferEpilogue: Source matrix required for backward pass" << std::endl;
     }
 
 private:
 	Activation m_activation;
-	bool m_sum_source;
 }; 
 
+// Vectorized element count optimized for modern GPU architectures
 template <typename T>
-// if using tensorCore, vec as 32, if using cuda cores, vec as 1 
-static constexpr int n_vectorized_elements = (! std::is_same<T, float>::value) ? (128 / sizeof(T)) : 1;
+static constexpr int n_vectorized_elements = 
+    (!std::is_same<T, float>::value) ? (128 / sizeof(T)) : 
+    (128 / (sizeof(T) * 4)); // Use wider vectors for float
 
 template <typename T>
 using ActivationOp = ActivationEpilogue<T, n_vectorized_elements<T>, TypeAccumulator, TypeCompute>;
@@ -183,25 +160,24 @@ using ActivationOp = ActivationEpilogue<T, n_vectorized_elements<T>, TypeAccumul
 template <typename T>
 using ActivationTransferOp = ActivationTransferEpilogue<T, n_vectorized_elements<T>, TypeAccumulator, TypeCompute>;
 
-// template structure ofr gemm op
+// Template structure for gemm op
 template<typename EPILOGUE, typename T>
 struct OurGemmWrapper; 
 
 cudaDataType_t getCUDADatatype(const std::type_info &type)
 {
     if (type == typeid(float)){
-        return CUDA_R_32F ;
-    }else if (type == typeid(__half)){
-        return CUDA_R_16F; 
+        return CUDA_R_32F;
+    } else if (type == typeid(__half)){
+        return CUDA_R_16F;
     }
     std::cout << "Unsupported data type" << std::endl;
     exit(EXIT_FAILURE);
 }
 
-// minic cutlass::epilogue
+// mimic cutlass::epilogue
 // as cutlass::epilogue op is smoothly using previous GEMM grid/block/warps mapping.
 // basically the fragment memory operated by the warp and threads in the warp can directly used for epilogue op again.
-
 template<typename EPILOGUE, typename T>
 void OurGemm(cublasHandle_t handle,
                   cublasOperation_t TransA,
@@ -214,8 +190,8 @@ void OurGemm(cublasHandle_t handle,
                   void *C, int ldc) {
     
     cudaDataType_t dataType = CUDA_R_32F;
-    if (! std::is_same<T, float>::value){
-        cudaDataType_t dataType = getCUDADatatype(typeid(__half)); 
+    if (!std::is_same<T, float>::value){
+        dataType = getCUDADatatype(typeid(__half)); 
     } 
     cublasStatus_t status = cublasGemmEx(handle, TransA, TransB,
                                          m, n, k,
@@ -230,27 +206,22 @@ void OurGemm(cublasHandle_t handle,
     if (status != CUBLAS_STATUS_SUCCESS) {
         throw std::runtime_error("cuBLAS GEMM failed");
     }
-    
-// #ifdef DEBUG_MODE    
-//     std::cout << "gemm output before epilogue" << std::endl ; 
-//     printCublasMatrix<TypeCompute>((const TypeCompute*)C, m, n, "pre_epilogue_C"); 
-// #endif  
-
     // do activation op on matrix C 
-    EPILOGUE myActivation ; 
-    if ( myActivation.is_source_needed()){
-        //TODO: need double check, should the source matrix be C ?
-        myActivation(C, C, m, n); 
-    }else{
-        myActivation((const float*)C, m, n); 
-    }
-    std::cout << "[DEBUG]: done activation after gemm op" << std::endl; 
-
-// #ifdef DEBUG_MODE   
-//     std::cout << "final gemm output after epilogue" << std::endl ;
-//     printCublasMatrix<TypeCompute>((const TypeCompute*)C, m, n, "post_epilogue_C");
-// #endif 
-
+    EPILOGUE myActivation; 
+    if (myActivation.is_source_needed()){
+        // Apply activation with source matrix (for backward pass)
+        myActivation(
+            static_cast<typename EPILOGUE::ElementAccumulator*>(C),
+            static_cast<typename EPILOGUE::ElementOutput*>(C),
+            m, n
+        ); 
+    } else {
+        // Apply activation without source matrix (for forward pass)
+        myActivation(
+            static_cast<typename EPILOGUE::ElementAccumulator*>(C),
+            m, n
+        ); 
+    } 
 }
 
 // specialization for float OurGemm 
@@ -266,7 +237,9 @@ struct OurGemmWrapper<EPILOGUE, float>{
                   const void *beta,
                   void *C, int ldc)
     {
-        std::cout << "[DEBUG]:  launch  float OurGemmWrapper " << std::endl ; 
+#ifdef DEBUG_MODE
+        std::cout << "[DEBUG]: launch float OurGemmWrapper" << std::endl; 
+#endif
         return OurGemm<EPILOGUE, float>(handle, TransA, TransB, m, n, k, alpha, A, lda, B, ldb, beta, C, ldc); 
     }
 }; 
@@ -284,7 +257,9 @@ struct OurGemmWrapper<EPILOGUE, __half>{
                   const void *beta,
                   void *C, int ldc)
     {
-        std::cout << "[DEBUG]: launch half OurGemmWrapper " << std::endl; 
+#ifdef DEBUG_MODE
+        std::cout << "[DEBUG]: launch half OurGemmWrapper" << std::endl; 
+#endif
         return OurGemm<EPILOGUE, __half>(handle, TransA, TransB, m, n, k, alpha, A, lda, B, ldb, beta, C, ldc); 
     }
 }; 
@@ -317,14 +292,14 @@ void OurSplitGemm(cublasHandle_t handle,
         if (status != CUBLAS_STATUS_SUCCESS) {
             throw std::runtime_error("cuBLAS GEMM failed");
         }       
-    }else{
+    } else {
         // Split-K GEMM implementation
         const T* B_slice;
         const T* A_slice;   
         int k_slice = k / split_k_slices;
         for (int slice = 0; slice < split_k_slices; ++slice) {
             //TODO: data access consider layout 
-            A_slice = static_cast<const T*>(A) + slice * k_slice ;
+            A_slice = static_cast<const T*>(A) + slice * k_slice;
             B_slice = static_cast<const T*>(B) + slice * k_slice * ldb;
             cublasStatus_t status = cublasGemmEx(handle, TransA, TransB,
                                                 m, n, k_slice,
@@ -371,18 +346,28 @@ void fc_multiply(cublasHandle_t &handle, cudaStream_t stream, const GPUMatrix<Ty
         throw std::runtime_error(fmt::format("Matrix D has incorrect size {}x{} != {}x{}", D.m(), D.n(), M, N));
     }
 
-    int lda = A.stride() ; 
-    int ldb = B.stride() ;
-    int ldc = C.stride() ;     
+    int lda = A.stride(); 
+    int ldb = B.stride();
+    int ldc = C.stride();     
 
     network_precision_t alpha = 1.0f;
     network_precision_t beta = sum_source ? 1.0f : 0.0f;
 
-    if(transfer){
-        OurGemmWrapper<ActivationTransferOp<MatmulTypeAccumulator>, network_precision_t>::gemm(handle, TransA, TransB, M, N, K, &alpha, A.data(), lda, B.data(), ldb, &beta, C.data(), ldc);
-    }else{
-        // TODO: sum_source op before epilogue  
-        OurGemmWrapper<ActivationOp<MatmulTypeAccumulator>, network_precision_t>::gemm(handle, TransA, TransB, M, N, K, &alpha, A.data(), lda, B.data(), ldb, &beta, C.data(), ldc);
+    if (transfer) {
+        // For backward pass (transfer = true)
+        typename ActivationTransferOp<MatmulTypeAccumulator>::Params params;
+        params.activation = act;
+        OurGemmWrapper<ActivationTransferOp<MatmulTypeAccumulator>, network_precision_t>::gemm(
+            handle, TransA, TransB, M, N, K, &alpha, A.data(), lda, B.data(), ldb, &beta, C.data(), ldc
+        );
+    } else {
+        // For forward pass (transfer = false)
+        typename ActivationOp<MatmulTypeAccumulator>::Params params;
+        params.activation = act;
+        params.sum_source = sum_source;
+        OurGemmWrapper<ActivationOp<MatmulTypeAccumulator>, network_precision_t>::gemm(
+            handle, TransA, TransB, M, N, K, &alpha, A.data(), lda, B.data(), ldb, &beta, C.data(), ldc
+        );
     }
 }
 
@@ -432,7 +417,6 @@ void convertColumnMajorToRowMajor_GPU(T* d_matrix_col_major, T* d_matrix_row_maj
     cudaDeviceSynchronize();
 }
 
-
 template <typename TypeA, MatrixLayout LayoutA, typename TypeB, MatrixLayout LayoutB, typename TypeC, MatrixLayout LayoutC, typename TypeD, MatrixLayout LayoutD>
 void fc_multiply_split_k(cublasHandle_t handle, cudaStream_t stream, const GPUMatrix<TypeA, LayoutA>& A, const GPUMatrix<TypeB, LayoutB>& B, const GPUMatrix<TypeC, LayoutC>& C, const GPUMatrix<TypeD, LayoutD>& D, int split_k_slices = 1, float beta = 0.0f) {
     
@@ -464,33 +448,27 @@ void fc_multiply_split_k(cublasHandle_t handle, cudaStream_t stream, const GPUMa
 
     // A(m, k), B(k, n), C(m, n) , leadning-dim only relate to physical memory layout, no matter T or N 
     // 因为tiny-cuda-nn 使用了自己的 gpu_matrix 类，并不是默认cublas 的layout。所以，这里leading-dim 需要跟 matrix 的stride 一致
-    int lda = A.stride() ; 
-    int ldb = B.stride() ;
-    int ldc = C.stride() ;
+    int lda = A.stride(); 
+    int ldb = B.stride();
+    int ldc = C.stride();
 
     // cublasSetStream(handle, stream);
     // TODO: need specify ComputeType and AccumulatorType 
-    network_precision_t alpha = __float2half(1.0) ; 
-    network_precision_t half_beta = __float2half(beta) ;  // for splitK case, need to accumulate C from each split to form final C matrix 
+    network_precision_t alpha = __float2half(1.0); 
+    network_precision_t half_beta = __float2half(beta);  // for splitK case, need to accumulate C from each split to form final C matrix 
 
-    if (TransC == CUBLAS_OP_N ){  // col-major in cublas, then use output C correctly 
+    if (TransC == CUBLAS_OP_N) {  // col-major in cublas, then use output C correctly 
         OurSplitGemm<network_precision_t>(handle, TransA, TransB, M, N, K, &alpha, A.data(), lda, B.data(), ldb, &half_beta, C.data(), ldc, split_k_slices); 
-    }else if(TransC == CUBLAS_OP_T){
-        // as the memory for output C  as row-major, while cublas consider C in col-major by default 
+    } else if (TransC == CUBLAS_OP_T) {
+        // as the memory for output C as row-major, while cublas consider C in col-major by default 
         printf("[DEBUG], matC is pre-allocated as row-major in memory, while cublas consider C in col-major. running memory layout convert here\n");
-        network_precision_t *C2 ; 
+        network_precision_t *C2; 
         CUDA_CHECK_THROW(cudaMalloc((void**)&C2, C.rows() * C.cols() * sizeof(network_precision_t))); // interpret C2 as col-major
         int ldc2 = C.rows(); 
         OurSplitGemm<network_precision_t>(handle, TransA, TransB, M, N, K, &alpha, A.data(), lda, B.data(), ldb, &half_beta, C2, ldc2, split_k_slices); 
         convertColumnMajorToRowMajor_GPU(C2, C.data(), C.rows(), C.cols()); 
         CUDA_CHECK_THROW(cudaFree(C2));
     }
-
-#ifdef DEBUG_MODE    
-    A.print_matrix("split_k_matA.log"); 
-    B.print_matrix("split_k_matB.log");
-    C.print_matrix("split_k_matC.log");
-#endif 
 }
 
 template <typename TypeA, MatrixLayout LayoutA, typename TypeB, MatrixLayout LayoutB, typename TypeC, typename TypeD>
@@ -527,6 +505,80 @@ void fc_multiply_split_k(cublasHandle_t handle, cudaStream_t stream, const GPUMa
 template <typename TypeA, typename TypeB, typename TypeD>
 void fc_multiply_split_k(cublasHandle_t handle, cudaStream_t stream, const GPUMatrixDynamic<TypeA>& A, const GPUMatrixDynamic<TypeB>& B, const GPUMatrixDynamic<TypeD>& D, int split_k_slices, float beta) {
 	fc_multiply_split_k(handle, stream, A, B, D, D, split_k_slices, beta);
+}
+
+// Kernel implementations
+
+// Fused activation kernel (forward pass)
+template <typename ElementAccumulator, int kCount, typename Activation>
+__global__ void fused_activation_kernel(Activation activation, ElementAccumulator* matrix, int num_elements) {
+    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const int offset = idx * kCount;
+    
+    if (offset < num_elements) {
+        TCNN_PRAGMA_UNROLL
+        for (int i = 0; i < kCount; ++i) {
+            const int element_idx = offset + i;
+            if (element_idx < num_elements) {
+                // Apply activation directly to matrix elements
+                matrix[element_idx] = activation.apply_activation(matrix[element_idx]);
+            }
+        }
+    }
+}
+
+// Fused activation kernel (backward pass)
+template <typename ElementAccumulator, int kCount, typename Activation>
+__global__ void fused_activation_backward_kernel(
+    Activation activation, 
+    ElementAccumulator* gradient, 
+    ElementAccumulator* source, 
+    int num_elements
+) {
+    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const int offset = idx * kCount;
+    
+    if (offset < num_elements) {
+        TCNN_PRAGMA_UNROLL
+        for (int i = 0; i < kCount; ++i) {
+            const int element_idx = offset + i;
+            if (element_idx < num_elements) {
+                // Apply activation derivative
+                const ElementAccumulator src_val = source[element_idx];
+                ElementAccumulator grad = gradient[element_idx];
+                
+                switch (activation.m_activation) {
+                    case Activation::ReLU:
+                        grad *= (src_val > 0) ? 1.0f : 0.0f;
+                        break;
+                    case Activation::Sigmoid: {
+                        const ElementAccumulator s = 1.0f / (1.0f + expf(-src_val));
+                        grad *= s * (1 - s);
+                        break;
+                    }
+                    case Activation::Exponential:
+                        grad *= expf(src_val);
+                        break;
+                    case Activation::Sine:
+                        grad *= cosf(src_val);
+                        break;
+                    case Activation::Squareplus: {
+                        const ElementAccumulator denom = sqrtf(src_val * src_val + 4);
+                        grad *= 0.5f * (1 + src_val / denom);
+                        break;
+                    }
+                    case Activation::Softplus:
+                        grad *= 1.0f / (1.0f + expf(-src_val));
+                        break;
+                    default:
+                        // No change for other activations
+                        break;
+                }
+                
+                gradient[element_idx] = grad;
+            }
+        }
+    }
 }
 
 }
