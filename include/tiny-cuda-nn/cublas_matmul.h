@@ -64,7 +64,7 @@ void cublas_gemm(
 	cudaStream_t stream,
 	const GPUMatrix<T, RM>& A,
 	const GPUMatrix<T, RM>& B,
-	GPUMatrix<T, RM>& C,
+	const GPUMatrix<T, RM>& C,
 	float alpha = 1.0f,
 	float beta = 0.0f
 ) {
@@ -107,7 +107,7 @@ void cublas_gemm(
 	cudaStream_t stream,
 	const GPUMatrix<T, CM>& A,
 	const GPUMatrix<T, CM>& B,
-	GPUMatrix<T, CM>& C,
+	const GPUMatrix<T, CM>& C,
 	float alpha = 1.0f,
 	float beta = 0.0f
 ) {
@@ -148,7 +148,7 @@ void cublas_gemm(
 	cudaStream_t stream,
 	const GPUMatrix<T, LA>& A,
 	const GPUMatrix<T, LB>& B,
-	GPUMatrix<T, LC>& C,
+	const GPUMatrix<T, LC>& C,
 	float alpha = 1.0f,
 	float beta = 0.0f
 ) {
@@ -212,7 +212,7 @@ void fc_multiply_split_k(cudaStream_t stream, const GPUMatrix<T, LA>& A, const G
 	}
 
 	if (split_k_slices == 1) {
-		cublas_gemm(stream, A, B, const_cast<GPUMatrix<T, LC>&>(C), 1.0f, beta);
+		cublas_gemm(stream, A, B, C, 1.0f, beta);
 		return;
 	}
 
@@ -225,10 +225,10 @@ void fc_multiply_split_k(cudaStream_t stream, const GPUMatrix<T, LA>& A, const G
 	for (int i = 0; i < split_k_slices; ++i) {
 		float current_beta = (i == 0) ? beta : 1.0f;
 
-		GPUMatrix<T, LA> A_slice = A.slice_cols(i * k_slice, k_slice);
-		GPUMatrix<T, LB> B_slice = B.slice_rows(i * k_slice, k_slice);
+		const GPUMatrix<T, LA> A_slice = A.slice_cols(i * k_slice, k_slice);
+		const GPUMatrix<T, LB> B_slice = B.slice_rows(i * k_slice, k_slice);
 
-		cublas_gemm(stream, A_slice, B_slice, const_cast<GPUMatrix<T, LC>&>(C), 1.0f, current_beta);
+		cublas_gemm(stream, A_slice, B_slice, C, 1.0f, current_beta);
 	}
 }
 
