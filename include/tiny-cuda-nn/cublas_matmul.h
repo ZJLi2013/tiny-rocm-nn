@@ -64,7 +64,7 @@ void cublas_gemm(
 	cudaStream_t stream,
 	const GPUMatrix<T, RM>& A,
 	const GPUMatrix<T, RM>& B,
-	const GPUMatrix<T, RM>& C,
+	GPUMatrix<T, RM>& C,
 	float alpha = 1.0f,
 	float beta = 0.0f
 ) {
@@ -107,7 +107,7 @@ void cublas_gemm(
 	cudaStream_t stream,
 	const GPUMatrix<T, CM>& A,
 	const GPUMatrix<T, CM>& B,
-	const GPUMatrix<T, CM>& C,
+	GPUMatrix<T, CM>& C,
 	float alpha = 1.0f,
 	float beta = 0.0f
 ) {
@@ -148,7 +148,7 @@ void cublas_gemm(
 	cudaStream_t stream,
 	const GPUMatrix<T, LA>& A,
 	const GPUMatrix<T, LB>& B,
-	const GPUMatrix<T, LC>& C,
+	GPUMatrix<T, LC>& C,
 	float alpha = 1.0f,
 	float beta = 0.0f
 ) {
@@ -206,7 +206,7 @@ void cublas_gemm(
 
 
 template <typename T, MatrixLayout LA, MatrixLayout LB, MatrixLayout LC, MatrixLayout LD>
-void fc_multiply_split_k(cudaStream_t stream, const GPUMatrix<T, LA>& A, const GPUMatrix<T, LB>& B, const GPUMatrix<T, LC>& C, const GPUMatrix<T, LD>& D, int split_k_slices = 1, float beta = 0.0f) {
+void fc_multiply_split_k(cudaStream_t stream, const GPUMatrix<T, LA>& A, const GPUMatrix<T, LB>& B, GPUMatrix<T, LC>& C, const GPUMatrix<T, LD>& D, int split_k_slices = 1, float beta = 0.0f) {
 	if (C.data() != D.data()) {
 		throw std::runtime_error("fc_multiply_split_k with cuBLAS requires C and D to be the same matrix.");
 	}
@@ -234,7 +234,7 @@ void fc_multiply_split_k(cudaStream_t stream, const GPUMatrix<T, LA>& A, const G
 
 // Overloads for GPUMatrixDynamic
 template <typename T, MatrixLayout LA, MatrixLayout LB, typename TC, typename TD>
-void fc_multiply_split_k(cudaStream_t stream, const GPUMatrix<T, LA>& A, const GPUMatrix<T, LB>& B, const GPUMatrixDynamic<TC>& C, const GPUMatrixDynamic<TD>& D, int split_k_slices = 1, float beta = 0.0f) {
+void fc_multiply_split_k(cudaStream_t stream, const GPUMatrix<T, LA>& A, const GPUMatrix<T, LB>& B, GPUMatrixDynamic<TC>& C, const GPUMatrixDynamic<TD>& D, int split_k_slices = 1, float beta = 0.0f) {
 	if (C.layout() != D.layout()) {
 		throw std::runtime_error{"fc_multiply_split_k: Layout of GPUMatrixDynamic C and D must be equal"};
 	}
@@ -247,7 +247,7 @@ void fc_multiply_split_k(cudaStream_t stream, const GPUMatrix<T, LA>& A, const G
 }
 
 template <typename T, MatrixLayout LA, typename TB, typename TC, typename TD>
-void fc_multiply_split_k(cudaStream_t stream, const GPUMatrix<T, LA>& A, const GPUMatrixDynamic<TB>& B, const GPUMatrixDynamic<TC>& C, const GPUMatrixDynamic<TD>& D, int split_k_slices = 1, float beta = 0.0f) {
+void fc_multiply_split_k(cudaStream_t stream, const GPUMatrix<T, LA>& A, const GPUMatrixDynamic<TB>& B, GPUMatrixDynamic<TC>& C, const GPUMatrixDynamic<TD>& D, int split_k_slices = 1, float beta = 0.0f) {
 	if (B.layout() == CM) {
 		fc_multiply_split_k(stream, A, B.cm(), C, D, split_k_slices, beta);
 	} else {
@@ -256,7 +256,7 @@ void fc_multiply_split_k(cudaStream_t stream, const GPUMatrix<T, LA>& A, const G
 }
 
 template <typename TA, typename TB, typename TC, typename TD>
-void fc_multiply_split_k(cudaStream_t stream, const GPUMatrixDynamic<TA>& A, const GPUMatrixDynamic<TB>& B, const GPUMatrixDynamic<TC>& C, const GPUMatrixDynamic<TD>& D, int split_k_slices = 1, float beta = 0.0f) {
+void fc_multiply_split_k(cudaStream_t stream, const GPUMatrixDynamic<TA>& A, const GPUMatrixDynamic<TB>& B, GPUMatrixDynamic<TC>& C, const GPUMatrixDynamic<TD>& D, int split_k_slices = 1, float beta = 0.0f) {
 	if (A.layout() == CM) {
 		fc_multiply_split_k(stream, A.cm(), B, C, D, split_k_slices, beta);
 	} else {
@@ -265,19 +265,89 @@ void fc_multiply_split_k(cudaStream_t stream, const GPUMatrixDynamic<TA>& A, con
 }
 
 template <typename TA, typename TB, typename TD>
-void fc_multiply_split_k(cudaStream_t stream, const GPUMatrixDynamic<TA>& A, const GPUMatrixDynamic<TB>& B, const GPUMatrixDynamic<TD>& D, int split_k_slices, float beta) {
+void fc_multiply_split_k(cudaStream_t stream, const GPUMatrixDynamic<TA>& A, const GPUMatrixDynamic<TB>& B, GPUMatrixDynamic<TD>& D, int split_k_slices, float beta) {
 	fc_multiply_split_k(stream, A, B, D, D, split_k_slices, beta);
 }
 
-// fc_multiply is not strictly needed for the task, but implemented for completeness.
-// It does not support activation fusion.
-template <typename ...Args>
-void fc_multiply(cudaStream_t stream, Args... args) {
-	// This is a simplified version that doesn't handle activation.
-	// The backward pass, which is our focus, uses fc_multiply_split_k.
-	// The arguments are unpacked to find the matrices and call cublas_gemm.
-	// This is a placeholder for a more robust implementation if needed.
-	// For now, we focus on fc_multiply_split_k.
+template <typename T, MatrixLayout LA, MatrixLayout LB, MatrixLayout LC, MatrixLayout LD>
+void fc_multiply(
+	cudaStream_t stream,
+	const GPUMatrix<T, LA>& A,
+	const GPUMatrix<T, LB>& B,
+	const GPUMatrix<T, LC>& C,
+	GPUMatrix<T, LD>& D,
+	Activation activation = Activation::None,
+	bool transfer = false,
+	bool sum_source = false
+) {
+	// Our cuBLAS wrapper does not support activation fusion.
+	// We simply perform the matrix multiplication part.
+	if (activation != Activation::None) {
+		// Optionally, we could warn the user that activation is ignored.
+	}
+
+	float beta = sum_source ? 1.0f : 0.0f;
+
+	if (C.data() != D.data()) {
+		if (sum_source) {
+			CUDA_CHECK_THROW(cudaMemcpyAsync(D.data(), C.data(), C.n_bytes(), cudaMemcpyDeviceToDevice, stream));
+		}
+		// If not summing, D will be overwritten anyway, so no copy needed.
+	}
+
+	cublas_gemm(stream, A, B, D, 1.0f, beta);
+}
+
+// Overloads for GPUMatrixDynamic
+template <typename T, MatrixLayout LA, MatrixLayout LB, typename TC, typename TD>
+void fc_multiply(
+	cudaStream_t stream,
+	const GPUMatrix<T, LA>& A,
+	const GPUMatrix<T, LB>& B,
+	const GPUMatrixDynamic<TC>& C,
+	GPUMatrixDynamic<TD>& D,
+	Activation activation = Activation::None,
+	bool transfer = false,
+	bool sum_source = false
+) {
+	if (C.layout() != D.layout()) {
+		throw std::runtime_error{"fc_multiply: Layout of GPUMatrixDynamic C and D must be equal"};
+	}
+
+	if (C.layout() == CM) {
+		fc_multiply(stream, A, B, C.cm(), D.cm(), activation, transfer, sum_source);
+	} else {
+		fc_multiply(stream, A, B, C.rm(), D.rm(), activation, transfer, sum_source);
+	}
+}
+
+template <typename T, MatrixLayout LA, typename TB, typename TC, typename TD>
+void fc_multiply(
+	cudaStream_t stream,
+	const GPUMatrix<T, LA>& A,
+	const GPUMatrixDynamic<TB>& B,
+	GPUMatrixDynamic<TC>& C,
+	GPUMatrixDynamic<TD>& D,
+	Activation activation = Activation::None,
+	bool transfer = false,
+	bool sum_source = false
+) {
+	if (B.layout() == CM) {
+		fc_multiply(stream, A, B.cm(), C, D, activation, transfer, sum_source);
+	} else {
+		fc_multiply(stream, A, B.rm(), C, D, activation, transfer, sum_source);
+	}
+}
+
+template <typename T, MatrixLayout LA, typename TB, typename TD>
+void fc_multiply(
+	cudaStream_t stream,
+	const GPUMatrix<T, LA>& A,
+	const GPUMatrixDynamic<TB>& B,
+	GPUMatrixDynamic<TD>& D,
+	Activation activation = Activation::None
+) {
+	fc_multiply(stream, A, B, D, D, activation, false, false);
 }
 
 

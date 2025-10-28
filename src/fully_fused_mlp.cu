@@ -884,7 +884,7 @@ std::unique_ptr<Context> FullyFusedMLP<T, WIDTH>::forward_impl(cudaStream_t stre
 	// the fully fused kernel (which will have written out the second-to-last layer activations).
 	if (output && m_output_width > 16) {
 		std::cout << "[DEBUG] called fc_multiply() forward_impl" << std::endl ;
-		fc_multiply(stream, output_weight_matrix(use_inference_params), forward->hidden.back(), *output, m_output_activation);
+		fc_multiply(stream, output_weight_matrix(use_inference_params), forward->hidden.back(), *output, *output, m_output_activation);
 	}
 
 	return forward;
@@ -945,7 +945,7 @@ void FullyFusedMLP<T, WIDTH>::backward_impl(
 
 	// 4. (特殊情况) 如果输出维度 > 16，则使用 `fc_multiply` 计算损失对倒数第二层激活值的梯度 ∂L/∂a_hidden。
 	if (m_output_width > 16) {
-		fc_multiply(stream, output_weight_matrix(use_inference_params).transposed(), tmp_dL_doutput, forward.hidden.at(tmp_idx), backward_tmp.at(backward_tmp_idx), m_activation, true);
+		fc_multiply(stream, output_weight_matrix(use_inference_params).transposed(), tmp_dL_doutput, backward_tmp.at(backward_tmp_idx), backward_tmp.at(backward_tmp_idx), m_activation, true, true);
 	}
 
 	auto dL_dinput_fused = input.m() == forward.hidden.at(0).m() && input.layout() == CM ? dL_dinput : nullptr;
@@ -989,7 +989,7 @@ void FullyFusedMLP<T, WIDTH>::backward_impl(
 		
 	// 7. 最后，如果需要且融合核未完成此工作，则单独计算 ∂L/∂input。
 	if (dL_dinput && !dL_dinput_fused) {
-		fc_multiply(stream, input_weight_matrix(use_inference_params).transposed(), backward_tmp.at(backward_tmp_idx-1), *dL_dinput);
+		fc_multiply(stream, input_weight_matrix(use_inference_params).transposed(), backward_tmp.at(backward_tmp_idx-1), *dL_dinput, *dL_dinput);
 	}
 }
 
