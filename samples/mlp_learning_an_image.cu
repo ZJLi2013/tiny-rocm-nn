@@ -139,7 +139,6 @@ int main(int argc, char* argv[]) {
 			}},
 			{"network", {
 				{"otype", "FullyFusedMLP"},
-				// {"otype", "CutlassMLP"},
 				{"n_neurons", 64},
 				{"n_hidden_layers", n_hidden_layers}, 
 				{"activation", "ReLU"},
@@ -152,6 +151,8 @@ int main(int argc, char* argv[]) {
 			std::ifstream f{argv[2]};
 			config = json::parse(f, nullptr, true, /*skip_comments=*/true);
 		}
+
+		std::cout << "Training with config: " << config.dump(4) << std::endl;
 
 		// First step: load an image that we'd like to learn
 		int width, height;
@@ -213,7 +214,7 @@ int main(int argc, char* argv[]) {
 
 		// Various constants for the network and optimization
 		const uint32_t batch_size = 256 ;  // 1 << 18;
-		const uint32_t n_training_steps = argc >= 4 ? atoi(argv[3]) : 5000;
+		const uint32_t n_training_steps = argc >= 4 ? atoi(argv[3]) : 2000;
 		const uint32_t n_input_dims = 2; // 2-D image coordinate
 		const uint32_t n_output_dims = 3; // RGB color
 
@@ -226,6 +227,13 @@ int main(int argc, char* argv[]) {
 		// Auxiliary matrices for training
 		GPUMatrix<float> training_target(n_output_dims, batch_size);
 		GPUMatrix<float> training_batch(n_input_dims, batch_size);
+
+		// 中文注释:
+		// 这里的矩阵维度被定义为 [dimension, num_elements]，而不是更常见的 [num_elements, dimension]，主要有以下两个原因：
+		// 1. 惯例与线性代数：在许多高性能计算库（如cuBLAS）中，习惯将数据矩阵的每一列视为一个独立的向量（例如一个训练样本）。
+		// 2. GPU 内存访问性能：这种列优先（Column-Major）的数据布局可以实现所谓的“合并内存访问”（Coalesced Memory Access）。
+		//    GPU 线程在并行处理数据时，可以一次性读取连续的内存块，这比读取分散在各处的数据要快得多。
+		//    tiny-cuda-nn 中的高度优化的CUDA核心（如 Fully-Fused MLP）就是为这种数据布局设计的，以最大限度地提高吞吐量。
 
 		// Auxiliary matrices for evaluation
 		GPUMatrix<float> prediction(n_output_dims, n_coords_padded);
@@ -318,4 +326,3 @@ int main(int argc, char* argv[]) {
 
 	return EXIT_SUCCESS;
 }
-

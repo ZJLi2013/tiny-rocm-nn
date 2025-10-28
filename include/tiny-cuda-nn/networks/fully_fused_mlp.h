@@ -63,9 +63,6 @@ public:
 	void set_params_impl(T* params, T* inference_params, T* gradients) override;
 	void initialize_params(pcg32& rnd, float* params_full_precision, float scale = 1) override;
 
-	// initial cublas handle
-	cublasHandle_t handle ;
-
 	GPUMatrix<T, RM>& input_weight_matrix(bool inference) {
 		auto& weight_matrices = inference ? m_weight_matrices_inference : m_weight_matrices;
 		return weight_matrices.front();

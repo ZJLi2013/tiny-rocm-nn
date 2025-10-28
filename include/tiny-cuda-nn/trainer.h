@@ -88,14 +88,44 @@ public:
 		CUDA_CHECK_THROW(cudaDeviceSynchronize());
 	}
 
+	// ForwardContext 结构体用于存储前向传播过程中的中间结果，这些结果在后续的反向传播和损失计算中是必需的。
+	// 它继承自 tcnn::Context，作为一个通用的上下文句柄。
 	struct ForwardContext : public Context {
+		// `perturbed_output`: 存储添加了随机扰动后的网络输出。
+		// 当训练时设置了 `m_perturbation_sigma > 0`，会在原始输出上增加噪声。
+		// 这是一种正则化技术，可以提高训练的鲁棒性。损失函数将基于这个被扰动的输出来计算。
+		// 如果没有设置扰动，此张量可能未使用。
 		GPUMatrix<COMPUTE_T> perturbed_output;
+
+		// `output` 是神经网络前向计算的结果，即模型的预测值，称之为 y_pred。
 		GPUMatrix<COMPUTE_T> output;
+
+		// 损失函数 L 会比较这个预测值 `output` 和真实目标 `target`，例如 L = f(y_pred, target)。
+		// `dL_doutput` 是损失函数 L 相对于网络输出 `output` 的偏导数（梯度），即 ∂L/∂y_pred。
+		// 在训练过程中，`output` 是前向传播的终点，而 `dL_doutput` 则是反向传播的起点。
 		GPUMatrix<COMPUTE_T> dL_doutput;
+
+		// `L`: 存储每个训练样本的损失值。
+		// 这是一个矩阵，其元素对应批处理中每个样本计算出的损失。对该矩阵所有元素求和可以得到整个批次的总体损失。
 		GPUMatrix<float> L;
+
+		// `model_ctx`: 存储底层模型（`m_model`）在前向传播过程中产生的内部上下文。
+		// 这通常包含了模型中间层的激活值等信息，是底层模型执行其自身反向传播（`m_model->backward()`）所必需的数据。
+		// Trainer 作为一个高级包装器，需要保存并传递这个底层上下文。
 		std::unique_ptr<Context> model_ctx;
 	};
 
+	// 执行一次完整的前向传播过程。
+	// 这个函数负责：
+	// 1. 调用底层模型(m_model)的 `forward` 方法，得到网络的原始输出 `output`。
+	// 2. (可选) 如果 `m_perturbation_sigma` > 0，在 `output` 上添加随机噪声，作为一种正则化手段。默认情况下，`m_perturbation_sigma` 为0，此步骤被跳过。
+	// 3. 计算损失和梯度。这里有两种模式：
+	//    a) 如果提供了 `external_dL_dy` (外部传入的梯度)，则直接使用它作为反向传播的起始梯度 `dL_doutput`。
+	//       `external_dL_dy` (dL/dy) 是一个高级用法，允许将 tiny-cuda-nn 集成到更大的计算图中（例如 PyTorch），
+	//       其中损失函数的计算和其对输出 `y` 的梯度是在框架外部完成的。
+	//    b) 如果 `external_dL_dy` 为 nullptr (默认情况)，则使用内部的损失函数 `m_loss` 来计算损失值 `L` 和关于输出的梯度 `dL_doutput`。
+	//
+	// @return 返回一个 `ForwardContext` 结构体，其中包含了反向传播所需的所有中间变量。
 	std::unique_ptr<ForwardContext> forward(
 		cudaStream_t stream,
 		const float loss_scale,
@@ -111,6 +141,16 @@ public:
 		auto forward = std::make_unique<ForwardContext>();
 
 		forward->output = GPUMatrix<COMPUTE_T>{m_model->padded_output_width(), batch_size, stream};
+
+		// 这里的 `m_model->forward` 调用同样遵循虚函数分派链，与 `backward` 类似。
+		// 调用路径:
+		// 1. `m_model` 指向一个 `NetworkWithInputEncoding` 对象。
+		// 2. 调用 `DifferentiableObject::forward()` (位于 object.h), 该公有方法内部调用虚方法 `forward_impl()`。
+		// 3. 实际执行的是 `NetworkWithInputEncoding::forward_impl()`。
+		// 4. 在 `NetworkWithInputEncoding` 内部，它会先调用 `m_encoding->forward()`，然后调用 `m_network->forward()`。
+		// 5. `m_network` 指向一个具体的网络实例 (例如 `FullyFusedMLP`)。
+		// 6. 这个调用最终会到达具体网络 (如 `FullyFusedMLP`) 的 `forward_impl()`，执行前向传播的CUDA核函数。
+		// 7. `forward_impl` 会返回一个包含中间结果（如各层激活值）的上下文 `ctx`，这里被赋值给 `forward->model_ctx` 以便反向传播时使用。
 		forward->model_ctx = m_model->forward(stream, input, &forward->output, use_inference_params, prepare_input_gradients);
 
 		if (m_perturbation_sigma > 0) {
@@ -136,6 +176,23 @@ public:
 			CHECK_THROW(m_model->output_width() == target.m());
 
 			forward->dL_doutput = GPUMatrix<COMPUTE_T>{m_model->padded_output_width(), batch_size, stream};
+
+			// 调用损失函数 m_loss 的 evaluate 方法来计算损失以及反向传播的起始梯度。
+			// 参数解析:
+			// 1. loss_scale: 损失缩放因子。在混合精度训练中，为了防止半精度（half）浮点数的梯度下溢（变为0），
+			//    通常会将损失值乘以一个较大的系数（如 65536.0），从而将梯度也相应放大。在优化器更新权重之前，会再将梯度缩放回来。
+			//
+			// 2. loss_input: 用于计算损失的模型输出。它就是模型的预测值（`forward->output`），如果开启了扰动，则是加了噪声的 `perturbed_output`。
+			//
+			// 3. target: 训练数据的真值（Ground Truth）。损失函数会比较 `loss_input` 和 `target` 的差异。
+			//
+			// 4. forward->L, forward->dL_doutput: 这两个是输出参数。它们是指向预先分配好形状的GPU内存的指针。
+			//    `evaluate` 函数会将计算出的逐样本损失值写入 `forward->L`，并将损失关于 `loss_input` 的梯度（∂L/∂y）写入 `forward->dL_doutput`。
+			//    所以你的理解“传入的是空gpu buffer ptr，但给定 tensor shape”是正确的。
+			//
+			// 5. data_pdf: (可选) 数据点的概率密度函数（Probability Density Function）。在一些非均匀采样策略中（如 NeRF 的重要性采样），
+			//    每个训练样本的重要性是不同的。`data_pdf` 提供了每个样本的采样概率，损失函数可以利用它来对每个样本的损失进行加权，
+			//    以得到一个无偏的估计。如果不需要，则为 nullptr。
 			m_loss->evaluate(stream, loss_scale, loss_input, target, forward->L, forward->dL_doutput, data_pdf);
 		}
 
@@ -146,7 +203,28 @@ public:
 		return forward(nullptr, loss_scale, input, target, data_pdf, use_inference_params, prepare_input_gradients, external_dL_dy);
 	}
 
+	// 执行反向传播过程。
+	// 这个函数是 Trainer 类中反向传播的入口点。它本身不做复杂的计算，
+	// 而是作为一个调度器，调用底层模型（m_model）的 `backward` 方法来真正执行计算。
+	//
+	// 工作流程:
+	// 1. 从前向传播的上下文 `ctx` 中提取所需的所有信息，例如：
+	//    - `ctx.model_ctx`: 底层模型自身的上下文，可能包含中间层的激活值。
+	//    - `ctx.output`: 前向传播时模型的输出。
+	//    - `ctx.dL_doutput`: 损失函数关于模型输出的梯度，这是反向传播的起点。
+	// 2. 将这些信息以及其他参数（如原始输入 `input`）传递给 `m_model->backward()`。
+	// 3. 底层模型（例如 `NetworkWithInputEncoding`）会利用这些信息，根据链式法则计算其可训练参数的梯度，
+	//    并将这些梯度存储在 `m_param_gradients` 指向的内存中。
+	// 4. (可选) 如果 `dL_dinput` 不是 nullptr，模型还会计算并传出损失关于最开始输入的梯度。
 	void backward(cudaStream_t stream, const ForwardContext& ctx, const GPUMatrixDynamic<T>& input, GPUMatrixDynamic<T>* dL_dinput = nullptr, bool use_inference_params = false, GradientMode param_gradients_mode = GradientMode::Overwrite) {
+		// 调用路径如下:
+		// 1. `m_model` 是一个 `DifferentiableObject` 指针，在我们的例子中，它指向一个 `NetworkWithInputEncoding` 对象。
+		// 2. 对 `m_model->backward()` 的调用首先进入 `DifferentiableObject` 类（在 object.h 中）的 `backward` 公有非虚方法。
+		// 3. 这个公有方法内部会调用虚方法 `backward_impl()`。
+		// 4. 由于多态，实际执行的是 `NetworkWithInputEncoding::backward_impl()`。
+		// 5. 在 `NetworkWithInputEncoding::backward_impl()` 内部，它又会调用其持有的 `m_network` 成员的 `backward()` 方法。
+		// 6. `m_network` 指向的是根据JSON配置创建的具体网络实例，例如 `FullyFusedMLP`。
+		// 7. 因此，调用链最终到达 `FullyFusedMLP::backward_impl()`，从而执行其高度优化的反向传播CUDA核函数。
 		m_model->backward(stream, *ctx.model_ctx, input, ctx.output, ctx.dL_doutput, dL_dinput, use_inference_params, param_gradients_mode);
 	}
 
@@ -162,6 +240,7 @@ public:
 		optimizer_step(nullptr, loss_scale);
 	}
 
+	// 执行一个完整的训练步骤，包括前向传播、反向传播和（可选的）优化器更新。
 	std::unique_ptr<ForwardContext> training_step(
 		cudaStream_t stream,
 		const GPUMatrixDynamic<T>& input,
