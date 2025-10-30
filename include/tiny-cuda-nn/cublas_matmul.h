@@ -205,7 +205,7 @@ void cublas_gemm(
 }
 
 
-// Base version: C and D must have the same layout
+// Base version: C and D must have the same layout (non-const C)
 template <typename T, MatrixLayout LA, MatrixLayout LB, MatrixLayout LC>
 void fc_multiply_split_k(cudaStream_t stream, const GPUMatrix<T, LA>& A, const GPUMatrix<T, LB>& B, GPUMatrix<T, LC>& C, const GPUMatrix<T, LC>& D, int split_k_slices = 1, float beta = 0.0f) {
 	if (C.data() != D.data()) {
@@ -230,6 +230,38 @@ void fc_multiply_split_k(cudaStream_t stream, const GPUMatrix<T, LA>& A, const G
 		const GPUMatrix<T, LB> B_slice = B.slice_rows(i * k_slice, k_slice);
 
 		cublas_gemm(stream, A_slice, B_slice, C, 1.0f, current_beta);
+	}
+}
+
+// Overload for const C and const D with same layout
+// This handles calls from const GPUMatrixDynamic methods like .cm() and .rm()
+template <typename T, MatrixLayout LA, MatrixLayout LB, MatrixLayout LC>
+void fc_multiply_split_k(cudaStream_t stream, const GPUMatrix<T, LA>& A, const GPUMatrix<T, LB>& B, const GPUMatrix<T, LC>& C, const GPUMatrix<T, LC>& D, int split_k_slices = 1, float beta = 0.0f) {
+	if (C.data() != D.data()) {
+		throw std::runtime_error("fc_multiply_split_k with cuBLAS requires C and D to be the same matrix.");
+	}
+
+	// Cast away constness for C since it's used as output
+	GPUMatrix<T, LC>& C_mutable = const_cast<GPUMatrix<T, LC>&>(C);
+
+	if (split_k_slices == 1) {
+		cublas_gemm(stream, A, B, C_mutable, 1.0f, beta);
+		return;
+	}
+
+	const int k = A.n();
+	if (k % split_k_slices != 0) {
+		throw std::runtime_error("split_k_slices must evenly divide k");
+	}
+	const int k_slice = k / split_k_slices;
+
+	for (int i = 0; i < split_k_slices; ++i) {
+		float current_beta = (i == 0) ? beta : 1.0f;
+
+		const GPUMatrix<T, LA> A_slice = A.slice_cols(i * k_slice, k_slice);
+		const GPUMatrix<T, LB> B_slice = B.slice_rows(i * k_slice, k_slice);
+
+		cublas_gemm(stream, A_slice, B_slice, C_mutable, 1.0f, current_beta);
 	}
 }
 
