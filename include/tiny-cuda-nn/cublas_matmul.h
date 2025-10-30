@@ -112,7 +112,7 @@ void cublas_gemm(
 	cublasSetStream(cublas_handle(), stream);
 
 	cudaDataType_t cuda_data_type = std::is_same<T, float>::value ? CUDA_R_32F : CUDA_R_16F;
-	cublasComputeType_t compute_type = std::is_same<T, float>::value ? CUBLAS_COMPUTE_32F : CUBLAS_COMPUTE_32F_FAST_16F;
+	cublasComputeType_t compute_type = CUBLAS_COMPUTE_32F;  // Use full FP32 for better numerical stability
 	
 	// Since all matrices are row-major, we can use the identity (A*B)^T = B^T * A^T
 	// and compute C_cm = B_cm * A_cm, which is equivalent to C_rm = A_rm * B_rm
@@ -155,7 +155,7 @@ void cublas_gemm(
 	cublasSetStream(cublas_handle(), stream);
 
 	cudaDataType_t cuda_data_type = std::is_same<T, float>::value ? CUDA_R_32F : CUDA_R_16F;
-	cublasComputeType_t compute_type = std::is_same<T, float>::value ? CUBLAS_COMPUTE_32F : CUBLAS_COMPUTE_32F_FAST_16F;
+	cublasComputeType_t compute_type = CUBLAS_COMPUTE_32F;  // Use full FP32 for better numerical stability
 
 	CUBLAS_CHECK_THROW(cublasGemmEx(
 		cublas_handle(),
@@ -199,10 +199,10 @@ void cublas_gemm(
 	cublasSetStream(cublas_handle(), stream);
 
 	cudaDataType_t cuda_data_type = std::is_same<T, float>::value ? CUDA_R_32F : CUDA_R_16F;
-	cublasComputeType_t compute_type = std::is_same<T, float>::value ? CUBLAS_COMPUTE_32F : CUBLAS_COMPUTE_32F_FAST_16F;
+	cublasComputeType_t compute_type = CUBLAS_COMPUTE_32F;  // Use full FP32 for better numerical stability
 	
-	// For FP16 data with CUBLAS_COMPUTE_32F_FAST_16F, alpha/beta should be float
-	// This allows FP16 inputs with FP32 accumulation
+	// For FP16 data with CUBLAS_COMPUTE_32F, alpha/beta should be float
+	// This provides full FP32 precision for accumulation
 
 	// Debug output for first few mixed layout calls
 	if (mixed_call_count <= 3) {

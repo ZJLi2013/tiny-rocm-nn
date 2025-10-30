@@ -214,7 +214,7 @@ int main(int argc, char* argv[]) {
 
 		// Various constants for the network and optimization
 		const uint32_t batch_size = 256 ;  // 1 << 18;
-		const uint32_t n_training_steps = argc >= 4 ? atoi(argv[3]) : 1005;
+		const uint32_t n_training_steps = argc >= 4 ? atoi(argv[3]) : 2005;
 		const uint32_t n_input_dims = 2; // 2-D image coordinate
 		const uint32_t n_output_dims = 3; // RGB color
 
@@ -260,8 +260,9 @@ int main(int argc, char* argv[]) {
 		uint32_t interval = 10;
 
 		for (uint32_t i = 0; i < n_training_steps; ++i) {
-			bool print_loss = i % interval == 0;
-			bool visualize_learned_func = argc < 5 && i % interval == 0;
+			// Print loss at specific steps: 0, 100, 1000, 2000
+			bool print_loss = (i == 0 || i == 100 || i == 1000 || i == 2000 || i % interval == 0);
+			bool visualize_learned_func = argc < 5 && (i == 0 || i == 100 || i == 1000 || i == 2000);
 
 			// Compute reference values at random coordinates
 			{
@@ -274,7 +275,7 @@ int main(int argc, char* argv[]) {
 				// std::cout << "[DEBUG] training step: " << i << std::endl ; 
 				auto ctx = trainer->training_step(training_stream, training_batch, training_target);
 
-				if (i % std::min(interval, (uint32_t)100) == 0) {
+				if (i % std::min(interval, (uint32_t)100) == 0 || i == 100 || i == 1000 || i == 2000) {
 					tmp_loss += trainer->loss(training_stream, *ctx);
 					++tmp_loss_counter;
 				}
