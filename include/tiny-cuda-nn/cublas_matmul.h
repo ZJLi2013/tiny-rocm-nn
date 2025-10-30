@@ -262,6 +262,15 @@ void fc_multiply_split_k(cudaStream_t stream, const GPUMatrix<T, LA>& A, const G
 // This handles calls from const GPUMatrixDynamic methods like .cm() and .rm()
 template <typename T, MatrixLayout LA, MatrixLayout LB, MatrixLayout LC>
 void fc_multiply_split_k(cudaStream_t stream, const GPUMatrix<T, LA>& A, const GPUMatrix<T, LB>& B, const GPUMatrix<T, LC>& C, const GPUMatrix<T, LC>& D, int split_k_slices = 1, float beta = 0.0f) {
+	static bool first_call = true;
+	if (first_call) {
+		std::cout << "[DEBUG fc_multiply_split_k CONST] A: " << A.m() << "x" << A.n() << " layout=" << (LA == CM ? "CM" : "RM") << " stride=" << A.stride() << std::endl;
+		std::cout << "[DEBUG fc_multiply_split_k CONST] B: " << B.m() << "x" << B.n() << " layout=" << (LB == CM ? "CM" : "RM") << " stride=" << B.stride() << std::endl;
+		std::cout << "[DEBUG fc_multiply_split_k CONST] C: " << C.m() << "x" << C.n() << " layout=" << (LC == CM ? "CM" : "RM") << " stride=" << C.stride() << std::endl;
+		std::cout << "[DEBUG fc_multiply_split_k CONST] split_k_slices=" << split_k_slices << " beta=" << beta << std::endl;
+		first_call = false;
+	}
+	
 	if (C.data() != D.data()) {
 		throw std::runtime_error("fc_multiply_split_k with cuBLAS requires C and D to be the same matrix.");
 	}
