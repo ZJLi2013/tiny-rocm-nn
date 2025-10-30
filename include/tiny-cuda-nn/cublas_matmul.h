@@ -205,8 +205,9 @@ void cublas_gemm(
 }
 
 
-template <typename T, MatrixLayout LA, MatrixLayout LB, MatrixLayout LC, MatrixLayout LD>
-void fc_multiply_split_k(cudaStream_t stream, const GPUMatrix<T, LA>& A, const GPUMatrix<T, LB>& B, GPUMatrix<T, LC>& C, const GPUMatrix<T, LD>& D, int split_k_slices = 1, float beta = 0.0f) {
+// Base version: C and D must have the same layout
+template <typename T, MatrixLayout LA, MatrixLayout LB, MatrixLayout LC>
+void fc_multiply_split_k(cudaStream_t stream, const GPUMatrix<T, LA>& A, const GPUMatrix<T, LB>& B, GPUMatrix<T, LC>& C, const GPUMatrix<T, LC>& D, int split_k_slices = 1, float beta = 0.0f) {
 	if (C.data() != D.data()) {
 		throw std::runtime_error("fc_multiply_split_k with cuBLAS requires C and D to be the same matrix.");
 	}
@@ -288,6 +289,7 @@ void fc_multiply_split_k(cudaStream_t stream, const GPUMatrix<T, LA>& A, const G
 	}
 }
 
+// Base version: all GPUMatrix with same layout for C and D
 template <typename T, MatrixLayout LA, MatrixLayout LB, MatrixLayout LC>
 void fc_multiply(
 	cudaStream_t stream,
@@ -326,6 +328,18 @@ void fc_multiply(
 			num_elements, activation, D.data(), D.data()
 		);
 	}
+}
+
+// Overload for when C and D are the same matrix (3-argument version)
+template <typename T, MatrixLayout LA, MatrixLayout LB, MatrixLayout LC>
+void fc_multiply(
+	cudaStream_t stream,
+	const GPUMatrix<T, LA>& A,
+	const GPUMatrix<T, LB>& B,
+	GPUMatrix<T, LC>& D,
+	Activation activation = Activation::None
+) {
+	fc_multiply(stream, A, B, D, D, activation, false, false);
 }
 
 // Overloads for GPUMatrixDynamic
