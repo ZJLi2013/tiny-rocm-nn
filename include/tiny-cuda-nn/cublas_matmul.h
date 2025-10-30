@@ -112,8 +112,8 @@ void cublas_gemm(
 	cublasSetStream(cublas_handle(), stream);
 
 	cudaDataType_t cuda_data_type = std::is_same<T, float>::value ? CUDA_R_32F : CUDA_R_16F;
-	cublasComputeType_t compute_type = std::is_same<T, float>::value ? CUBLAS_COMPUTE_32F : CUBLAS_COMPUTE_16F;
-
+	cublasComputeType_t compute_type = std::is_same<T, float>::value ? CUBLAS_COMPUTE_32F : CUBLAS_COMPUTE_32F_FAST_16F;
+	
 	// Since all matrices are row-major, we can use the identity (A*B)^T = B^T * A^T
 	// and compute C_cm = B_cm * A_cm, which is equivalent to C_rm = A_rm * B_rm
 	// but with swapped arguments.
@@ -127,7 +127,7 @@ void cublas_gemm(
 		&beta,
 		C.data(), cuda_data_type, C.stride(),
 		compute_type,
-		CUBLAS_GEMM_DEFAULT
+		CUBLAS_GEMM_DEFAULT_TENSOR_OP
 	));
 }
 
@@ -155,7 +155,7 @@ void cublas_gemm(
 	cublasSetStream(cublas_handle(), stream);
 
 	cudaDataType_t cuda_data_type = std::is_same<T, float>::value ? CUDA_R_32F : CUDA_R_16F;
-	cublasComputeType_t compute_type = std::is_same<T, float>::value ? CUBLAS_COMPUTE_32F : CUBLAS_COMPUTE_16F;
+	cublasComputeType_t compute_type = std::is_same<T, float>::value ? CUBLAS_COMPUTE_32F : CUBLAS_COMPUTE_32F_FAST_16F;
 
 	CUBLAS_CHECK_THROW(cublasGemmEx(
 		cublas_handle(),
@@ -167,7 +167,7 @@ void cublas_gemm(
 		&beta,
 		C.data(), cuda_data_type, C.stride(),
 		compute_type,
-		CUBLAS_GEMM_DEFAULT
+		CUBLAS_GEMM_DEFAULT_TENSOR_OP
 	));
 }
 
@@ -199,7 +199,10 @@ void cublas_gemm(
 	cublasSetStream(cublas_handle(), stream);
 
 	cudaDataType_t cuda_data_type = std::is_same<T, float>::value ? CUDA_R_32F : CUDA_R_16F;
-	cublasComputeType_t compute_type = std::is_same<T, float>::value ? CUBLAS_COMPUTE_32F : CUBLAS_COMPUTE_16F;
+	cublasComputeType_t compute_type = std::is_same<T, float>::value ? CUBLAS_COMPUTE_32F : CUBLAS_COMPUTE_32F_FAST_16F;
+	
+	// For FP16 data with CUBLAS_COMPUTE_32F_FAST_16F, alpha/beta should be float
+	// This allows FP16 inputs with FP32 accumulation
 
 	// Debug output for first few mixed layout calls
 	if (mixed_call_count <= 3) {
@@ -215,22 +218,24 @@ void cublas_gemm(
 	
 	if (LC == RM) {
 		// Output is RM: C_rm (m×n) = A (m×k) * B (k×n)
-		// Interpret as: C_cm^T (n×m) = B_cm^T (n×k) * A_cm^T (k×m)
+		// Use identity: C_rm = A * B ⟺ C_cm^T = B^T * A^T
 		// 
-		// Key insight: RM matrices are physically stored transposed relative to CM
-		// - RM matrix (m×n) with stride=n is stored as: row0, row1, ..., row_{m-1}
-		// - When cuBLAS interprets this as CM, it sees (n×m) with stride=n
-		// - To get the correct (m×n) interpretation, we need CUBLAS_OP_T
-		//
-		// For A (CM): already CM, use CUBLAS_OP_N (no transpose needed)
-		// For B (RM): interpreted as transposed CM, use CUBLAS_OP_T to transpose back
-		cublasOperation_t op_a = LA == RM ? CUBLAS_OP_T : CUBLAS_OP_N;
-		cublasOperation_t op_b = LB == RM ? CUBLAS_OP_T : CUBLAS_OP_N;
+		// Strategy: Compute C^T using cuBLAS (which outputs CM)
+		// cuBLAS computes: C_cm^T (n×m) = first_matrix * second_matrix
+		// We want: C_cm^T (n×m) = B^T (n×k) * A^T (k×m)
+		// 
+		// Key: RM matrices are already "transposed" when viewed as CM
+		// - RM (m×n, stride=n) viewed as CM is (n×m, stride=n)
+		// - So we use CUBLAS_OP_N (no additional transpose needed)
+		// - CM matrices need CUBLAS_OP_T to transpose them
+		cublasOperation_t op_a = LA == RM ? CUBLAS_OP_N : CUBLAS_OP_T;
+		cublasOperation_t op_b = LB == RM ? CUBLAS_OP_N : CUBLAS_OP_T;
 		
 		if (mixed_call_count <= 3) {
 			std::cout << "  Output is RM, using C^T = B^T * A^T" << std::endl;
 			std::cout << "  op_b=" << (op_b == CUBLAS_OP_N ? "N" : "T") << ", op_a=" << (op_a == CUBLAS_OP_N ? "N" : "T") << std::endl;
 			std::cout << "  cuBLAS call: gemm(op_b, op_a, n=" << n << ", m=" << m << ", k=" << k << ")" << std::endl;
+			std::cout << "  ldb=" << B.stride() << ", lda=" << A.stride() << ", ldc=" << C.stride() << std::endl;
 			
 			// Print input matrix samples
 			print_matrix_sample("  Input A", A.data(), m, k, A.stride(), LA, stream);
@@ -248,7 +253,7 @@ void cublas_gemm(
 			&beta,
 			C.data(), cuda_data_type, C.stride(),
 			compute_type,
-			CUBLAS_GEMM_DEFAULT
+			CUBLAS_GEMM_DEFAULT_TENSOR_OP
 		));
 		
 		if (mixed_call_count <= 3) {
@@ -275,7 +280,7 @@ void cublas_gemm(
 			&beta,
 			C.data(), cuda_data_type, C.stride(),
 			compute_type,
-			CUBLAS_GEMM_DEFAULT
+			CUBLAS_GEMM_DEFAULT_TENSOR_OP
 		));
 	}
 }
