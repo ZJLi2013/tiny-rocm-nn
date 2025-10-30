@@ -169,17 +169,20 @@ void cublas_gemm(
 	cudaDataType_t cuda_data_type = std::is_same<T, float>::value ? CUDA_R_32F : CUDA_R_16F;
 	cublasComputeType_t compute_type = std::is_same<T, float>::value ? CUBLAS_COMPUTE_32F : CUBLAS_COMPUTE_16F;
 
-	// For mixed layouts, convert to a uniform approach similar to RM-RM
-	// Key: avoid using CUBLAS_OP_T, use CUBLAS_OP_N with proper matrix reinterpretation
+	// For mixed layouts, we need to carefully handle the transpose operations
+	// cuBLAS is column-major, so we interpret RM matrices as transposed CM matrices
 	
 	if (LC == RM) {
-		// All output RM: use the RM-RM strategy
-		// C_rm = A * B <=> C_cm^T = B^T * A^T
-		// Treat as: C_cm^T (n×m) = B_cm^T (n×k) * A_cm^T (k×m)
-		// Use CUBLAS_OP_N for both, swap A and B
+		// Output is RM: C_rm (m×n) = A (m×k) * B (k×n)
+		// Interpret as: C_cm^T (n×m) = B_cm^T (n×k) * A_cm^T (k×m)
+		// For A (CM): need to transpose it, so op_a = CUBLAS_OP_T
+		// For B (RM): already transposed when viewed as CM, so op_b = CUBLAS_OP_N
+		cublasOperation_t op_a = LA == RM ? CUBLAS_OP_N : CUBLAS_OP_T;
+		cublasOperation_t op_b = LB == RM ? CUBLAS_OP_N : CUBLAS_OP_T;
+		
 		CUBLAS_CHECK_THROW(cublasGemmEx(
 			cublas_handle(),
-			CUBLAS_OP_N, CUBLAS_OP_N,
+			op_b, op_a,
 			n, m, k,
 			&alpha,
 			B.data(), cuda_data_type, B.stride(),
