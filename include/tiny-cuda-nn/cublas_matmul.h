@@ -169,45 +169,40 @@ void cublas_gemm(
 	cudaDataType_t cuda_data_type = std::is_same<T, float>::value ? CUDA_R_32F : CUDA_R_16F;
 	cublasComputeType_t compute_type = std::is_same<T, float>::value ? CUBLAS_COMPUTE_32F : CUBLAS_COMPUTE_16F;
 
-	// cuBLAS is column-major. For row-major matrices, we use CUBLAS_OP_T.
-	// Leading dimension depends on the operation:
-	// - For CUBLAS_OP_N: lda = stride() (works for both CM and RM)
-	// - For CUBLAS_OP_T: lda = m() for RM (the dimension being transposed)
+	// For mixed layouts, convert to a uniform approach similar to RM-RM
+	// Key: avoid using CUBLAS_OP_T, use CUBLAS_OP_N with proper matrix reinterpretation
 	
-	cublasOperation_t op_a = LA == RM ? CUBLAS_OP_T : CUBLAS_OP_N;
-	cublasOperation_t op_b = LB == RM ? CUBLAS_OP_T : CUBLAS_OP_N;
-	
-	// Calculate leading dimensions based on layout and operation
-	int lda = (LA == CM) ? A.stride() : A.m();
-	int ldb = (LB == CM) ? B.stride() : B.m();
-	int ldc = (LC == CM) ? C.stride() : C.m();
-	
-	if (LC == CM) {
-		// Output is column-major, compute directly: C = op(A) * op(B)
+	if (LC == RM) {
+		// All output RM: use the RM-RM strategy
+		// C_rm = A * B <=> C_cm^T = B^T * A^T
+		// Treat as: C_cm^T (n×m) = B_cm^T (n×k) * A_cm^T (k×m)
+		// Use CUBLAS_OP_N for both, swap A and B
+		CUBLAS_CHECK_THROW(cublasGemmEx(
+			cublas_handle(),
+			CUBLAS_OP_N, CUBLAS_OP_N,
+			n, m, k,
+			&alpha,
+			B.data(), cuda_data_type, B.stride(),
+			A.data(), cuda_data_type, A.stride(),
+			&beta,
+			C.data(), cuda_data_type, C.stride(),
+			compute_type,
+			CUBLAS_GEMM_DEFAULT
+		));
+	} else {
+		// Output is CM: use standard approach
+		cublasOperation_t op_a = LA == RM ? CUBLAS_OP_T : CUBLAS_OP_N;
+		cublasOperation_t op_b = LB == RM ? CUBLAS_OP_T : CUBLAS_OP_N;
+		
 		CUBLAS_CHECK_THROW(cublasGemmEx(
 			cublas_handle(),
 			op_a, op_b,
 			m, n, k,
 			&alpha,
-			A.data(), cuda_data_type, lda,
-			B.data(), cuda_data_type, ldb,
+			A.data(), cuda_data_type, A.stride(),
+			B.data(), cuda_data_type, B.stride(),
 			&beta,
-			C.data(), cuda_data_type, ldc,
-			compute_type,
-			CUBLAS_GEMM_DEFAULT
-		));
-	} else {
-		// Output is row-major. Use identity: C_rm = A * B <=> C_cm^T = B^T * A^T
-		// Swap A and B, swap m and n
-		CUBLAS_CHECK_THROW(cublasGemmEx(
-			cublas_handle(),
-			op_b, op_a,
-			n, m, k,
-			&alpha,
-			B.data(), cuda_data_type, ldb,
-			A.data(), cuda_data_type, lda,
-			&beta,
-			C.data(), cuda_data_type, ldc,
+			C.data(), cuda_data_type, C.stride(),
 			compute_type,
 			CUBLAS_GEMM_DEFAULT
 		));
