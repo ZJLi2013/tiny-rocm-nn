@@ -160,6 +160,14 @@ public:
 		}
 
 		uint32_t n_weights_to_optimize = n_weights();
+		
+		// v015: Monitor weights before update
+		static std::vector<float> weights_before;
+		if (m_current_step == 1 || m_current_step == 100 || m_current_step == 1000 || m_current_step == 2000) {
+			weights_before.resize(n_weights_to_optimize);
+			cudaStreamSynchronize(stream);
+			CUDA_CHECK_THROW(cudaMemcpy(weights_before.data(), weights_full_precision, n_weights_to_optimize * sizeof(float), cudaMemcpyDeviceToHost));
+		}
 
 		linear_kernel(adam_step<T>, 0, stream,
 			n_weights_to_optimize,
@@ -185,6 +193,32 @@ public:
 			m_second_moments.data(),
 			m_param_steps.data()
 		);
+		
+		// v015: Monitor weight updates
+		if (m_current_step == 1 || m_current_step == 100 || m_current_step == 1000 || m_current_step == 2000) {
+			std::vector<float> weights_after(n_weights_to_optimize);
+			cudaStreamSynchronize(stream);
+			CUDA_CHECK_THROW(cudaMemcpy(weights_after.data(), weights_full_precision, n_weights_to_optimize * sizeof(float), cudaMemcpyDeviceToHost));
+			
+			// Compute weight update statistics
+			double weight_norm_sq = 0.0, update_norm_sq = 0.0;
+			for (uint32_t i = 0; i < n_weights_to_optimize; ++i) {
+				float w = weights_after[i];
+				float delta = weights_after[i] - weights_before[i];
+				weight_norm_sq += w * w;
+				update_norm_sq += delta * delta;
+			}
+			
+			float weight_norm = std::sqrt(weight_norm_sq / n_weights_to_optimize);
+			float update_norm = std::sqrt(update_norm_sq / n_weights_to_optimize);
+			float relative_update = update_norm / (weight_norm + 1e-8f);
+			
+			std::cout << "[v015 Adam Monitor] Step " << m_current_step << ":" << std::endl;
+			std::cout << "  Weight L2 norm: " << weight_norm << std::endl;
+			std::cout << "  Update L2 norm: " << update_norm << std::endl;
+			std::cout << "  Relative update: " << relative_update << " (update/weight ratio)" << std::endl;
+			std::cout << "  Learning rate: " << m_base_learning_rate << std::endl;
+		}
 	}
 
 	float learning_rate() const override {
