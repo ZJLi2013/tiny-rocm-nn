@@ -216,13 +216,16 @@ void cublas_gemm(
 	if (LC == RM) {
 		// Output is RM: C_rm (m×n) = A (m×k) * B (k×n)
 		// Interpret as: C_cm^T (n×m) = B_cm^T (n×k) * A_cm^T (k×m)
-		// But cuBLAS computes: result = first_matrix * second_matrix
-		// We want: C^T = B^T * A^T, which gives C = A * B (correct!)
-		// So: first=B, second=A, and we need to transpose each appropriately
-		// For A (CM): as CM, use CUBLAS_OP_T to transpose
-		// For B (RM): as CM is already transposed, use CUBLAS_OP_N
-		cublasOperation_t op_a = LA == RM ? CUBLAS_OP_N : CUBLAS_OP_T;
-		cublasOperation_t op_b = LB == RM ? CUBLAS_OP_N : CUBLAS_OP_T;
+		// 
+		// Key insight: RM matrices are physically stored transposed relative to CM
+		// - RM matrix (m×n) with stride=n is stored as: row0, row1, ..., row_{m-1}
+		// - When cuBLAS interprets this as CM, it sees (n×m) with stride=n
+		// - To get the correct (m×n) interpretation, we need CUBLAS_OP_T
+		//
+		// For A (CM): already CM, use CUBLAS_OP_N (no transpose needed)
+		// For B (RM): interpreted as transposed CM, use CUBLAS_OP_T to transpose back
+		cublasOperation_t op_a = LA == RM ? CUBLAS_OP_T : CUBLAS_OP_N;
+		cublasOperation_t op_b = LB == RM ? CUBLAS_OP_T : CUBLAS_OP_N;
 		
 		if (mixed_call_count <= 3) {
 			std::cout << "  Output is RM, using C^T = B^T * A^T" << std::endl;
