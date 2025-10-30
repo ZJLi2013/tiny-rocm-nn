@@ -269,13 +269,32 @@ void fc_multiply_split_k(cudaStream_t stream, const GPUMatrixDynamic<TA>& A, con
 	fc_multiply_split_k(stream, A, B, D, D, split_k_slices, beta);
 }
 
-template <typename T, MatrixLayout LA, MatrixLayout LB, MatrixLayout LC, MatrixLayout LD>
+// Additional overloads for mixed GPUMatrix/GPUMatrixDynamic with 4 matrix parameters
+template <typename TA, typename T, MatrixLayout LB, MatrixLayout LC>
+void fc_multiply_split_k(cudaStream_t stream, const GPUMatrixDynamic<TA>& A, const GPUMatrix<T, LB>& B, GPUMatrix<T, LC>& C, const GPUMatrix<T, LC>& D, int split_k_slices = 1, float beta = 0.0f) {
+	if (A.layout() == CM) {
+		fc_multiply_split_k(stream, A.cm(), B, C, D, split_k_slices, beta);
+	} else {
+		fc_multiply_split_k(stream, A.rm(), B, C, D, split_k_slices, beta);
+	}
+}
+
+template <typename T, MatrixLayout LA, typename TB, MatrixLayout LC>
+void fc_multiply_split_k(cudaStream_t stream, const GPUMatrix<T, LA>& A, const GPUMatrixDynamic<TB>& B, GPUMatrix<T, LC>& C, const GPUMatrix<T, LC>& D, int split_k_slices = 1, float beta = 0.0f) {
+	if (B.layout() == CM) {
+		fc_multiply_split_k(stream, A, B.cm(), C, D, split_k_slices, beta);
+	} else {
+		fc_multiply_split_k(stream, A, B.rm(), C, D, split_k_slices, beta);
+	}
+}
+
+template <typename T, MatrixLayout LA, MatrixLayout LB, MatrixLayout LC>
 void fc_multiply(
 	cudaStream_t stream,
 	const GPUMatrix<T, LA>& A,
 	const GPUMatrix<T, LB>& B,
 	const GPUMatrix<T, LC>& C,
-	GPUMatrix<T, LD>& D,
+	GPUMatrix<T, LC>& D,
 	Activation activation = Activation::None,
 	bool transfer = false,
 	bool sum_source = false
