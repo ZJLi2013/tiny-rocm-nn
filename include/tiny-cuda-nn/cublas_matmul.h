@@ -169,35 +169,51 @@ void cublas_gemm(
 	cudaDataType_t cuda_data_type = std::is_same<T, float>::value ? CUDA_R_32F : CUDA_R_16F;
 	cublasComputeType_t compute_type = std::is_same<T, float>::value ? CUBLAS_COMPUTE_32F : CUBLAS_COMPUTE_16F;
 
-	cublasOperation_t op_a = LA == RM ? CUBLAS_OP_T : CUBLAS_OP_N;
-	cublasOperation_t op_b = LB == RM ? CUBLAS_OP_T : CUBLAS_OP_N;
-
-	// cuBLAS is column-major. We want to compute C_lc = op(A) * op(B)
-	// If C is row-major, we compute C_cm^T = op(B) * op(A) instead.
-	if (LC == RM) {
-		// Swap A and B, and swap m and n
-		CUBLAS_CHECK_THROW(cublasGemmEx(
-			cublas_handle(),
-			op_b, op_a,
-			n, m, k,
-			&alpha,
-			B.data(), cuda_data_type, B.stride(),
-			A.data(), cuda_data_type, A.stride(),
-			&beta,
-			C.data(), cuda_data_type, C.stride(),
-			compute_type,
-			CUBLAS_GEMM_DEFAULT
-		));
-	} else {
+	// cuBLAS is column-major by default. We need to handle row-major matrices.
+	// For row-major matrices, we use the identity: (A*B)^T = B^T * A^T
+	
+	// Determine operations and leading dimensions based on actual layouts
+	cublasOperation_t op_a, op_b;
+	int lda, ldb, ldc;
+	
+	if (LC == CM) {
+		// Output is column-major, compute directly: C = op(A) * op(B)
+		op_a = LA == RM ? CUBLAS_OP_T : CUBLAS_OP_N;
+		op_b = LB == RM ? CUBLAS_OP_T : CUBLAS_OP_N;
+		lda = A.stride();
+		ldb = B.stride();
+		ldc = C.stride();
+		
 		CUBLAS_CHECK_THROW(cublasGemmEx(
 			cublas_handle(),
 			op_a, op_b,
 			m, n, k,
 			&alpha,
-			A.data(), cuda_data_type, A.stride(),
-			B.data(), cuda_data_type, B.stride(),
+			A.data(), cuda_data_type, lda,
+			B.data(), cuda_data_type, ldb,
 			&beta,
-			C.data(), cuda_data_type, C.stride(),
+			C.data(), cuda_data_type, ldc,
+			compute_type,
+			CUBLAS_GEMM_DEFAULT
+		));
+	} else {
+		// Output is row-major, compute C^T = op(B)^T * op(A)^T = op'(B) * op'(A)
+		// where op' is the opposite operation (T<->N)
+		op_a = LA == RM ? CUBLAS_OP_N : CUBLAS_OP_T;
+		op_b = LB == RM ? CUBLAS_OP_N : CUBLAS_OP_T;
+		lda = B.stride();
+		ldb = A.stride();
+		ldc = C.stride();
+		
+		CUBLAS_CHECK_THROW(cublasGemmEx(
+			cublas_handle(),
+			op_b, op_a,
+			n, m, k,
+			&alpha,
+			B.data(), cuda_data_type, lda,
+			A.data(), cuda_data_type, ldb,
+			&beta,
+			C.data(), cuda_data_type, ldc,
 			compute_type,
 			CUBLAS_GEMM_DEFAULT
 		));
