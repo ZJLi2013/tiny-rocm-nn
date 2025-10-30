@@ -70,6 +70,66 @@ void print_matrix_sample(const char* name, const T* data, int m, int n, int stri
 	}
 }
 
+// v017: Manual verification of matrix multiplication C = A * B
+template <typename T, MatrixLayout LA, MatrixLayout LB, MatrixLayout LC>
+void verify_gemm_result(const char* call_name, const GPUMatrix<T, LA>& A, const GPUMatrix<T, LB>& B, const GPUMatrix<T, LC>& C, cudaStream_t stream = 0) {
+	const int m = A.m();
+	const int k = A.n();
+	const int n = B.n();
+	
+	// Copy matrices to host
+	std::vector<T> h_A(m * k);
+	std::vector<T> h_B(k * n);
+	std::vector<T> h_C(m * n);
+	
+	cudaStreamSynchronize(stream);
+	CUDA_CHECK_THROW(cudaMemcpy(h_A.data(), A.data(), m * k * sizeof(T), cudaMemcpyDeviceToHost));
+	CUDA_CHECK_THROW(cudaMemcpy(h_B.data(), B.data(), k * n * sizeof(T), cudaMemcpyDeviceToHost));
+	CUDA_CHECK_THROW(cudaMemcpy(h_C.data(), C.data(), m * n * sizeof(T), cudaMemcpyDeviceToHost));
+	
+	// Manually compute C[0,0] = sum(A[0,i] * B[i,0])
+	float expected_c00 = 0.0f;
+	for (int i = 0; i < std::min(k, 256); ++i) {  // Limit to first 256 elements for speed
+		float a_val, b_val;
+		if (LA == CM) {
+			a_val = (float)h_A[0 + i * A.stride()];  // A[0,i] in CM
+		} else {
+			a_val = (float)h_A[0 * A.stride() + i];  // A[0,i] in RM
+		}
+		
+		if (LB == CM) {
+			b_val = (float)h_B[i + 0 * B.stride()];  // B[i,0] in CM
+		} else {
+			b_val = (float)h_B[i * B.stride() + 0];  // B[i,0] in RM
+		}
+		
+		expected_c00 += a_val * b_val;
+	}
+	
+	// Get actual C[0,0]
+	float actual_c00;
+	if (LC == CM) {
+		actual_c00 = (float)h_C[0 + 0 * C.stride()];
+	} else {
+		actual_c00 = (float)h_C[0 * C.stride() + 0];
+	}
+	
+	float error = std::abs(expected_c00 - actual_c00);
+	float relative_error = error / (std::abs(expected_c00) + 1e-6f);
+	
+	std::cout << "[v017 GEMM Verification] " << call_name << ":" << std::endl;
+	std::cout << "  Expected C[0,0]: " << expected_c00 << std::endl;
+	std::cout << "  Actual C[0,0]: " << actual_c00 << std::endl;
+	std::cout << "  Absolute error: " << error << std::endl;
+	std::cout << "  Relative error: " << (relative_error * 100.0f) << "%" << std::endl;
+	
+	if (relative_error > 0.01f) {  // More than 1% error
+		std::cout << "  ⚠️ WARNING: Large error detected!" << std::endl;
+	} else {
+		std::cout << "  ✓ Verification passed" << std::endl;
+	}
+}
+
 #define CUBLAS_CHECK_THROW(x)                                                                                        \
 	do {                                                                                                                   \
 		cublasStatus_t _result = x;                                                                                    \
@@ -258,6 +318,8 @@ void cublas_gemm(
 		
 		if (mixed_call_count <= 3) {
 			print_matrix_sample("  Output C", C.data(), m, n, C.stride(), LC, stream);
+			// v017: Verify GEMM correctness
+			verify_gemm_result("Mixed Layout RM Output", A, B, C, stream);
 		}
 	} else {
 		// Output is CM: use standard approach
@@ -282,6 +344,11 @@ void cublas_gemm(
 			compute_type,
 			CUBLAS_GEMM_DEFAULT_TENSOR_OP
 		));
+		
+		if (mixed_call_count <= 3) {
+			// v017: Verify GEMM correctness
+			verify_gemm_result("Mixed Layout CM Output", A, B, C, stream);
+		}
 	}
 }
 
