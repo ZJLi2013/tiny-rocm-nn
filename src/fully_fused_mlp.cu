@@ -939,6 +939,18 @@ void FullyFusedMLP<T, WIDTH>::backward_impl(
 	// 3. 计算输出层权重的梯度：∂L/∂W_out = (∂L/∂a_out) * (a_hidden)^T。
 	//    这里使用 `fc_multiply_split_k` 函数，它将矩阵乘法在K维度上拆分，以提高并行度和性能。
 	if (param_gradients_mode != GradientMode::Ignore) {
+		static bool debug_first = true;
+		if (debug_first) {
+			std::cout << "[DEBUG backward_impl] Computing output layer weight gradient" << std::endl;
+			std::cout << "[DEBUG backward_impl] tmp_dL_doutput: " << tmp_dL_doutput.m() << "x" << tmp_dL_doutput.n() 
+			          << " layout=" << (tmp_dL_doutput.layout() == CM ? "CM" : "RM") << std::endl;
+			std::cout << "[DEBUG backward_impl] forward.hidden.at(" << tmp_idx << ").transposed(): " 
+			          << forward.hidden.at(tmp_idx).n() << "x" << forward.hidden.at(tmp_idx).m() << std::endl;
+			std::cout << "[DEBUG backward_impl] output_gradient_matrix(): " << output_gradient_matrix().m() << "x" << output_gradient_matrix().n() << std::endl;
+			std::cout << "[DEBUG backward_impl] split_k_factor=" << split_k_factor << " param_gradient_beta=" << param_gradient_beta << std::endl;
+			debug_first = false;
+		}
+		
 		multi_streams.emplace_back(stream, 2);
 		fc_multiply_split_k(multi_streams.back().get(1), tmp_dL_doutput, forward.hidden.at(tmp_idx).transposed(), output_gradient_matrix(), split_k_factor, param_gradient_beta);
 	}
