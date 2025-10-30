@@ -289,14 +289,14 @@ void fc_multiply_split_k(cudaStream_t stream, const GPUMatrix<T, LA>& A, const G
 	}
 }
 
-// Base version: all GPUMatrix with same layout for C and D
-template <typename T, MatrixLayout LA, MatrixLayout LB, MatrixLayout LC>
+// Base version: C and D can have different layouts
+template <typename T, MatrixLayout LA, MatrixLayout LB, MatrixLayout LC, MatrixLayout LD>
 void fc_multiply(
 	cudaStream_t stream,
 	const GPUMatrix<T, LA>& A,
 	const GPUMatrix<T, LB>& B,
 	const GPUMatrix<T, LC>& C,
-	GPUMatrix<T, LC>& D,
+	GPUMatrix<T, LD>& D,
 	Activation activation = Activation::None,
 	bool transfer = false,
 	bool sum_source = false
@@ -342,33 +342,39 @@ void fc_multiply(
 	fc_multiply(stream, A, B, D, D, activation, false, false);
 }
 
-// Additional overload for 4 GPUMatrix parameters where C and D have same layout (non-const C)
-// This is needed to match calls from non-const GPUMatrixDynamic overloads
+// Overload for 4 GPUMatrix parameters with same layout (const C, const D)
+// This handles calls from const GPUMatrixDynamic methods like .cm() and .rm()
 template <typename T, MatrixLayout LA, MatrixLayout LB, MatrixLayout LCD>
 void fc_multiply(
 	cudaStream_t stream,
 	const GPUMatrix<T, LA>& A,
 	const GPUMatrix<T, LB>& B,
-	GPUMatrix<T, LCD>& C,
-	GPUMatrix<T, LCD>& D,
+	const GPUMatrix<T, LCD>& C,
+	const GPUMatrix<T, LCD>& D,
 	Activation activation = Activation::None,
 	bool transfer = false,
 	bool sum_source = false
 ) {
-	// Ensure C and D are the same matrix
-	if (C.data() != D.data()) {
-		throw std::runtime_error("cuBLAS fc_multiply requires C and D to be the same matrix.");
-	}
-
 	// cuBLAS does not support activation fusion or transfer operations
 	if (transfer) {
 		throw std::runtime_error("cuBLAS fc_multiply does not support transfer=true. This requires activation backward with forward values.");
 	}
 
+	// Since both C and D are const, we need to cast away constness for the output D
+	// This is safe because D is logically the output parameter
+	GPUMatrix<T, LCD>& D_mutable = const_cast<GPUMatrix<T, LCD>&>(D);
+
 	float beta = sum_source ? 1.0f : 0.0f;
 
-	// Perform matrix multiplication using the mixed-layout cublas_gemm
-	cublas_gemm(stream, A, B, D, 1.0f, beta);
+	// Handle C != D case
+	if (C.data() != D.data()) {
+		if (sum_source) {
+			CUDA_CHECK_THROW(cudaMemcpyAsync(D_mutable.data(), C.data(), C.n_bytes(), cudaMemcpyDeviceToDevice, stream));
+		}
+	}
+
+	// Perform matrix multiplication
+	cublas_gemm(stream, A, B, D_mutable, 1.0f, beta);
 
 	// Apply activation function if needed (not fused, separate kernel)
 	if (activation != Activation::None) {
@@ -377,20 +383,20 @@ void fc_multiply(
 		const uint32_t n_blocks = (num_elements + N_THREADS - 1) / N_THREADS;
 		
 		kernel_activation<T, 1><<<n_blocks, N_THREADS, 0, stream>>>(
-			num_elements, activation, D.data(), D.data()
+			num_elements, activation, D_mutable.data(), D_mutable.data()
 		);
 	}
 }
 
-
-// Overload for 4 GPUMatrix parameters with same layout for C and D
-template <typename T, MatrixLayout LA, MatrixLayout LB, MatrixLayout LC, MatrixLayout LD>
+// Overload for 4 GPUMatrix parameters with same layout (non-const C)
+// This handles calls where C and D are non-const and have the same layout
+template <typename T, MatrixLayout LA, MatrixLayout LB, MatrixLayout LCD>
 void fc_multiply(
 	cudaStream_t stream,
 	const GPUMatrix<T, LA>& A,
 	const GPUMatrix<T, LB>& B,
-	const GPUMatrix<T, LC>& C,
-	GPUMatrix<T, LD>& D,
+	GPUMatrix<T, LCD>& C,
+	GPUMatrix<T, LCD>& D,
 	Activation activation = Activation::None,
 	bool transfer = false,
 	bool sum_source = false
