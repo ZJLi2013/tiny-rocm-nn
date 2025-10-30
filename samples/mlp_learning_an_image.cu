@@ -271,7 +271,7 @@ int main(int argc, char* argv[]) {
 
 			// Training step
 			{
-				std::cout << "[DEBUG] training step: " << i << std::endl ; 
+				// std::cout << "[DEBUG] training step: " << i << std::endl ; 
 				auto ctx = trainer->training_step(training_stream, training_batch, training_target);
 
 				if (i % std::min(interval, (uint32_t)100) == 0) {
