@@ -342,16 +342,15 @@ void fc_multiply(
 	fc_multiply(stream, A, B, D, D, activation, false, false);
 }
 
-// Additional overload for mixed GPUMatrix with 4 layout parameters
-// This handles cases where C and D have explicitly different layout template parameters
-// but are actually the same matrix at runtime
-template <typename T, MatrixLayout LA, MatrixLayout LB, MatrixLayout LC, MatrixLayout LD>
+// Additional overload for 4 GPUMatrix parameters where C and D have same layout
+// This is needed to match calls from GPUMatrixDynamic overloads
+template <typename T, MatrixLayout LA, MatrixLayout LB, MatrixLayout LCD>
 void fc_multiply(
 	cudaStream_t stream,
 	const GPUMatrix<T, LA>& A,
 	const GPUMatrix<T, LB>& B,
-	const GPUMatrix<T, LC>& C,
-	GPUMatrix<T, LD>& D,
+	GPUMatrix<T, LCD>& C,
+	GPUMatrix<T, LCD>& D,
 	Activation activation = Activation::None,
 	bool transfer = false,
 	bool sum_source = false
@@ -360,12 +359,7 @@ void fc_multiply(
 	if (C.data() != D.data()) {
 		throw std::runtime_error("cuBLAS fc_multiply requires C and D to be the same matrix.");
 	}
-	
-	// Ensure C and D have the same layout at runtime
-	if (LC != LD) {
-		throw std::runtime_error("cuBLAS fc_multiply requires C and D to have the same layout.");
-	}
-	
+
 	// cuBLAS does not support activation fusion or transfer operations
 	if (transfer) {
 		throw std::runtime_error("cuBLAS fc_multiply does not support transfer=true. This requires activation backward with forward values.");
