@@ -342,6 +342,52 @@ void fc_multiply(
 	fc_multiply(stream, A, B, D, D, activation, false, false);
 }
 
+// Additional overload for mixed GPUMatrix with 4 layout parameters
+// This handles cases where C and D have explicitly different layout template parameters
+// but are actually the same matrix at runtime
+template <typename T, MatrixLayout LA, MatrixLayout LB, MatrixLayout LC, MatrixLayout LD>
+void fc_multiply(
+	cudaStream_t stream,
+	const GPUMatrix<T, LA>& A,
+	const GPUMatrix<T, LB>& B,
+	const GPUMatrix<T, LC>& C,
+	GPUMatrix<T, LD>& D,
+	Activation activation = Activation::None,
+	bool transfer = false,
+	bool sum_source = false
+) {
+	// Ensure C and D are the same matrix
+	if (C.data() != D.data()) {
+		throw std::runtime_error("cuBLAS fc_multiply requires C and D to be the same matrix.");
+	}
+	
+	// Ensure C and D have the same layout at runtime
+	if (LC != LD) {
+		throw std::runtime_error("cuBLAS fc_multiply requires C and D to have the same layout.");
+	}
+	
+	// cuBLAS does not support activation fusion or transfer operations
+	if (transfer) {
+		throw std::runtime_error("cuBLAS fc_multiply does not support transfer=true. This requires activation backward with forward values.");
+	}
+
+	float beta = sum_source ? 1.0f : 0.0f;
+
+	// Perform matrix multiplication using the mixed-layout cublas_gemm
+	cublas_gemm(stream, A, B, D, 1.0f, beta);
+
+	// Apply activation function if needed (not fused, separate kernel)
+	if (activation != Activation::None) {
+		const uint32_t num_elements = D.m() * D.n();
+		constexpr uint32_t N_THREADS = 128;
+		const uint32_t n_blocks = (num_elements + N_THREADS - 1) / N_THREADS;
+		
+		kernel_activation<T, 1><<<n_blocks, N_THREADS, 0, stream>>>(
+			num_elements, activation, D.data(), D.data()
+		);
+	}
+}
+
 // Overloads for GPUMatrixDynamic
 template <typename T, MatrixLayout LA, MatrixLayout LB, typename TC, typename TD>
 void fc_multiply(
