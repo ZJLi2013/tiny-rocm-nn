@@ -280,22 +280,33 @@ void fc_multiply(
 	bool transfer = false,
 	bool sum_source = false
 ) {
-	// Our cuBLAS wrapper does not support activation fusion.
-	// We simply perform the matrix multiplication part.
-	if (activation != Activation::None) {
-		// Optionally, we could warn the user that activation is ignored.
+	// cuBLAS does not support activation fusion or transfer operations
+	if (transfer) {
+		throw std::runtime_error("cuBLAS fc_multiply does not support transfer=true. This requires activation backward with forward values.");
 	}
 
 	float beta = sum_source ? 1.0f : 0.0f;
 
+	// Handle C != D case
 	if (C.data() != D.data()) {
 		if (sum_source) {
 			CUDA_CHECK_THROW(cudaMemcpyAsync(D.data(), C.data(), C.n_bytes(), cudaMemcpyDeviceToDevice, stream));
 		}
-		// If not summing, D will be overwritten anyway, so no copy needed.
 	}
 
+	// Perform matrix multiplication
 	cublas_gemm(stream, A, B, D, 1.0f, beta);
+
+	// Apply activation function if needed (not fused, separate kernel)
+	if (activation != Activation::None) {
+		const uint32_t num_elements = D.m() * D.n();
+		constexpr uint32_t N_THREADS = 128;
+		const uint32_t n_blocks = (num_elements + N_THREADS - 1) / N_THREADS;
+		
+		kernel_activation<T, 1><<<n_blocks, N_THREADS, 0, stream>>>(
+			num_elements, activation, D.data(), D.data()
+		);
+	}
 }
 
 // Overloads for GPUMatrixDynamic
