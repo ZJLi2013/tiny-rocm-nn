@@ -169,8 +169,8 @@ void cublas_gemm(
 	cudaDataType_t cuda_data_type = std::is_same<T, float>::value ? CUDA_R_32F : CUDA_R_16F;
 	cublasComputeType_t compute_type = std::is_same<T, float>::value ? CUBLAS_COMPUTE_32F : CUBLAS_COMPUTE_16F;
 
-	// cuBLAS is column-major by default. We need to handle row-major matrices.
-	// For row-major C, we use: C_rm = A * B is equivalent to C_cm^T = B^T * A^T
+	// cuBLAS is column-major. For row-major matrices, we use CUBLAS_OP_T.
+	// stride() gives the correct leading dimension for cuBLAS
 	
 	cublasOperation_t op_a = LA == RM ? CUBLAS_OP_T : CUBLAS_OP_N;
 	cublasOperation_t op_b = LB == RM ? CUBLAS_OP_T : CUBLAS_OP_N;
@@ -191,7 +191,7 @@ void cublas_gemm(
 		));
 	} else {
 		// Output is row-major. Use identity: C_rm = A * B <=> C_cm^T = B^T * A^T
-		// Swap A and B, swap m and n, keep the same operations
+		// Swap A and B, swap m and n
 		CUBLAS_CHECK_THROW(cublasGemmEx(
 			cublas_handle(),
 			op_b, op_a,
