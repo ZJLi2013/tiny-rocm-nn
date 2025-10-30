@@ -41,6 +41,21 @@
 
 namespace tcnn {
 
+// Helper function to compute L2 norm of a matrix for debugging
+template <typename T>
+float compute_matrix_l2_norm(cudaStream_t stream, const T* data, uint32_t n_elements) {
+	std::vector<T> h_data(n_elements);
+	cudaStreamSynchronize(stream);
+	CUDA_CHECK_THROW(cudaMemcpy(h_data.data(), data, n_elements * sizeof(T), cudaMemcpyDeviceToHost));
+	
+	double sum_sq = 0.0;
+	for (uint32_t i = 0; i < n_elements; ++i) {
+		float val = (float)h_data[i];
+		sum_sq += val * val;
+	}
+	return std::sqrt(sum_sq / n_elements);
+}
+
 
 
 void check_shmem_error(cudaError_t error) {
@@ -997,6 +1012,36 @@ void FullyFusedMLP<T, WIDTH>::backward_impl(
 	if (param_gradients_mode != GradientMode::Ignore) {
 		multi_streams.emplace_back(stream, 2);
 		fc_multiply_split_k(multi_streams.back().get(1), backward_tmp.at(backward_tmp_idx-1), input.transposed(), input_gradient_matrix(), split_k_factor, param_gradient_beta);
+	}
+	
+	// v014: Add gradient monitoring to track gradient vanishing/explosion
+	static uint32_t training_step_counter = 0;
+	training_step_counter++;
+	
+	if (training_step_counter == 1 || training_step_counter == 100 || training_step_counter == 1000 || training_step_counter == 2000) {
+		std::cout << "\n[v014 Gradient Monitor] Step " << training_step_counter << ":" << std::endl;
+		
+		// Monitor output layer gradient
+		float output_grad_norm = compute_matrix_l2_norm(stream, tmp_dL_doutput.data(), tmp_dL_doutput.n_elements());
+		std::cout << "  Output gradient L2 norm: " << output_grad_norm << std::endl;
+		
+		// Monitor backward_tmp gradients (activation gradients from fused kernel)
+		if (backward_tmp_idx > 0) {
+			float hidden_grad_norm = compute_matrix_l2_norm(stream, backward_tmp.at(backward_tmp_idx-1).data(), backward_tmp.at(backward_tmp_idx-1).n_elements());
+			std::cout << "  Hidden gradient L2 norm: " << hidden_grad_norm << std::endl;
+		}
+		
+		// Monitor weight gradients
+		float output_weight_grad_norm = compute_matrix_l2_norm(stream, output_gradient_matrix().data(), output_gradient_matrix().n_elements());
+		std::cout << "  Output weight gradient L2 norm: " << output_weight_grad_norm << std::endl;
+		
+		if (m_n_hidden_matmuls > 0) {
+			float hidden_weight_grad_norm = compute_matrix_l2_norm(stream, gradient_matrix_at(0).data(), gradient_matrix_at(0).n_elements());
+			std::cout << "  Hidden weight gradient L2 norm: " << hidden_weight_grad_norm << std::endl;
+		}
+		
+		float input_weight_grad_norm = compute_matrix_l2_norm(stream, input_gradient_matrix().data(), input_gradient_matrix().n_elements());
+		std::cout << "  Input weight gradient L2 norm: " << input_weight_grad_norm << std::endl;
 	}
 		
 	// 7. 最后，如果需要且融合核未完成此工作，则单独计算 ∂L/∂input。
