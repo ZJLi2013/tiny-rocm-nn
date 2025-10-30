@@ -124,7 +124,7 @@ int main(int argc, char* argv[]) {
 				// {"otype", "Shampoo"},
 				{"learning_rate", 1e-2},
 				{"beta1", 0.9f},
-				{"beta2", 0.99f},
+				{"beta2", 0.95f},  // v016: Changed from 0.99 to 0.95 to reduce second moment accumulation
 				{"l2_reg", 0.0f},
 				// The following parameters are only used when the optimizer is "Shampoo".
 				{"beta3", 0.9f},
