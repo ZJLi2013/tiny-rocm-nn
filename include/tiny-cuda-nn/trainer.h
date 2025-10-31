@@ -252,49 +252,19 @@ public:
 		GradientMode param_gradients_mode = GradientMode::Overwrite,
 		const GPUMatrix<COMPUTE_T>* external_dL_dy = nullptr
 	) {
-		static int step_count = 0;
-		static bool debug_first_step = true;
-		
-		if (debug_first_step && step_count == 0) {
-			std::cout << "[DEBUG training_step] Step " << step_count << ": input=" << input.m() << "x" << input.n() 
-			          << " target=" << target.m() << "x" << target.n() << std::endl;
-		}
-		
 		const float loss_scale = default_loss_scale<PARAMS_T>();
 
 		// Execute forward and backward in a CUDA graph for maximum performance.
 		std::unique_ptr<ForwardContext> ctx;
 		{
-			if (debug_first_step && step_count == 0) {
-				std::cout << "[DEBUG training_step] Calling forward..." << std::endl;
-			}
-			
-			// Execute forward and backward in a CUDA graph for maximum performance.
 			ctx = forward(stream, loss_scale, input, target, data_pdf, use_inference_params, dL_dinput, external_dL_dy);
-			
-			if (debug_first_step && step_count == 0) {
-				std::cout << "[DEBUG training_step] Forward done. Calling backward..." << std::endl;
-			}
-			
 			backward(stream, *ctx, input, dL_dinput, use_inference_params, param_gradients_mode);
-			
-			if (debug_first_step && step_count == 0) {
-				std::cout << "[DEBUG training_step] Backward done." << std::endl;
-			}
 		}
 
 		if (run_optimizer) {
-			if (debug_first_step && step_count == 0) {
-				std::cout << "[DEBUG training_step] Calling optimizer_step..." << std::endl;
-			}
 			optimizer_step(stream, loss_scale);
-			if (debug_first_step && step_count == 0) {
-				std::cout << "[DEBUG training_step] Optimizer step done." << std::endl;
-				debug_first_step = false;
-			}
 		}
 		
-		step_count++;
 		return ctx;
 	}
 

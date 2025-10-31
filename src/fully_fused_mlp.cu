@@ -54,7 +54,6 @@ __device__ void sh2gmem(__half* device_mem, const __half* __restrict__ shmem, in
 	// blockDim.x, blockDim.y, blockDim.z are dimension/size of the t-block. a.k.a 32, 4, 1 
 	int tid =  threadIdx.x + threadIdx.y * blockDim.x ; 
     if(tid< N){
-		// printf("%f", __half2float(shmem[tid]));  // TODO: why get all zeros ? 
         device_mem[tid] = shmem[tid]; 
     }
 	__syncthreads(); 
@@ -855,8 +854,7 @@ std::unique_ptr<Context> FullyFusedMLP<T, WIDTH>::forward_impl(cudaStream_t stre
 	// Make sure our temporary buffers have the correct size for the given batch size
 	uint32_t batch_size = input.n();
 	auto forward = allocate_forward_buffers(stream, batch_size);
-//	std::cout << "[DEBUG]: check mlp_fused_forward() calls. m_activation: " << to_string(m_activation) << " output_activation: " << to_string(m_output_activation) << std::endl ;
-	// m_activation==ReLU,  output_activation=None
+
 	// ASSUMPTION: weight matrices & forward_tmp matrices are contiguous in memory
 	switch (m_activation) {
 		case Activation::None:        mlp_fused_forward<WIDTH, T, Activation::None, false>(       stream, m_output_activation, input_weight_matrix(use_inference_params), input, forward->hidden.at(0), output, m_n_hidden_matmuls); break;
@@ -881,7 +879,6 @@ std::unique_ptr<Context> FullyFusedMLP<T, WIDTH>::forward_impl(cudaStream_t stre
 	// If we have more than 16 output dimensions, these will be taken care of by CUTLASS rather than
 	// the fully fused kernel (which will have written out the second-to-last layer activations).
 	if (output && m_output_width > 16) {
-		std::cout << "[DEBUG] called fc_multiply() forward_impl" << std::endl ;
 		fc_multiply(stream, output_weight_matrix(use_inference_params), forward->hidden.back(), *output, *output, m_output_activation);
 	}
 
@@ -937,18 +934,6 @@ void FullyFusedMLP<T, WIDTH>::backward_impl(
 	// 3. 计算输出层权重的梯度：∂L/∂W_out = (∂L/∂a_out) * (a_hidden)^T。
 	//    这里使用 `fc_multiply_split_k` 函数，它将矩阵乘法在K维度上拆分，以提高并行度和性能。
 	if (param_gradients_mode != GradientMode::Ignore) {
-		static bool debug_first = true;
-		if (debug_first) {
-			std::cout << "[DEBUG backward_impl] Computing output layer weight gradient" << std::endl;
-			std::cout << "[DEBUG backward_impl] tmp_dL_doutput: " << tmp_dL_doutput.m() << "x" << tmp_dL_doutput.n() 
-			          << " layout=" << (tmp_dL_doutput.layout() == CM ? "CM" : "RM") << std::endl;
-			std::cout << "[DEBUG backward_impl] forward.hidden.at(" << tmp_idx << ").transposed(): " 
-			          << forward.hidden.at(tmp_idx).n() << "x" << forward.hidden.at(tmp_idx).m() << std::endl;
-			std::cout << "[DEBUG backward_impl] output_gradient_matrix(): " << output_gradient_matrix().m() << "x" << output_gradient_matrix().n() << std::endl;
-			std::cout << "[DEBUG backward_impl] split_k_factor=" << split_k_factor << " param_gradient_beta=" << param_gradient_beta << std::endl;
-			debug_first = false;
-		}
-		
 		multi_streams.emplace_back(stream, 2);
 		fc_multiply_split_k(multi_streams.back().get(1), tmp_dL_doutput, forward.hidden.at(tmp_idx).transposed(), output_gradient_matrix(), split_k_factor, param_gradient_beta);
 	}
@@ -996,12 +981,7 @@ void FullyFusedMLP<T, WIDTH>::backward_impl(
 		multi_streams.emplace_back(stream, 2);
 		fc_multiply_split_k(multi_streams.back().get(1), backward_tmp.at(backward_tmp_idx-1), input.transposed(), input_gradient_matrix(), split_k_factor, param_gradient_beta);
 	}
-	
-	// v014: Add gradient monitoring to track gradient vanishing/explosion
-	static uint32_t training_step_counter = 0;
-	training_step_counter++;
-	
-		
+
 	// 7. 最后，如果需要且融合核未完成此工作，则单独计算 ∂L/∂input。
 	if (dL_dinput && !dL_dinput_fused) {
 		fc_multiply(stream, input_weight_matrix(use_inference_params).transposed(), backward_tmp.at(backward_tmp_idx-1), *dL_dinput, *dL_dinput);

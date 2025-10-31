@@ -36,99 +36,9 @@
 
 #include <cublas_v2.h>
 
-#include <iostream>
 #include <type_traits>
-#include <vector>
-#include <iomanip>
 
 namespace tcnn {
-
-// Helper function to print matrix values for debugging
-template <typename T>
-void print_matrix_sample(const char* name, const T* data, int m, int n, int stride, MatrixLayout layout, cudaStream_t stream = 0) {
-	const int sample_size = std::min(4, std::min(m, n));
-	std::vector<T> h_data(m * n);
-	
-	cudaStreamSynchronize(stream);
-	CUDA_CHECK_THROW(cudaMemcpy(h_data.data(), data, m * n * sizeof(T), cudaMemcpyDeviceToHost));
-	
-	std::cout << name << " (" << m << "x" << n << ", " << (layout == CM ? "CM" : "RM") 
-	          << ", stride=" << stride << ") sample:" << std::endl;
-	
-	for (int i = 0; i < sample_size; ++i) {
-		std::cout << "  ";
-		for (int j = 0; j < sample_size; ++j) {
-			float val;
-			if (layout == CM) {
-				val = (float)h_data[i + j * stride];
-			} else {
-				val = (float)h_data[i * stride + j];
-			}
-			std::cout << std::setw(8) << std::fixed << std::setprecision(3) << val << " ";
-		}
-		std::cout << std::endl;
-	}
-}
-
-// v017: Manual verification of matrix multiplication C = A * B
-template <typename T, MatrixLayout LA, MatrixLayout LB, MatrixLayout LC>
-void verify_gemm_result(const char* call_name, const GPUMatrix<T, LA>& A, const GPUMatrix<T, LB>& B, const GPUMatrix<T, LC>& C, cudaStream_t stream = 0) {
-	const int m = A.m();
-	const int k = A.n();
-	const int n = B.n();
-	
-	// Copy matrices to host
-	std::vector<T> h_A(m * k);
-	std::vector<T> h_B(k * n);
-	std::vector<T> h_C(m * n);
-	
-	cudaStreamSynchronize(stream);
-	CUDA_CHECK_THROW(cudaMemcpy(h_A.data(), A.data(), m * k * sizeof(T), cudaMemcpyDeviceToHost));
-	CUDA_CHECK_THROW(cudaMemcpy(h_B.data(), B.data(), k * n * sizeof(T), cudaMemcpyDeviceToHost));
-	CUDA_CHECK_THROW(cudaMemcpy(h_C.data(), C.data(), m * n * sizeof(T), cudaMemcpyDeviceToHost));
-	
-	// Manually compute C[0,0] = sum(A[0,i] * B[i,0])
-	float expected_c00 = 0.0f;
-	for (int i = 0; i < std::min(k, 256); ++i) {  // Limit to first 256 elements for speed
-		float a_val, b_val;
-		if (LA == CM) {
-			a_val = (float)h_A[0 + i * A.stride()];  // A[0,i] in CM
-		} else {
-			a_val = (float)h_A[0 * A.stride() + i];  // A[0,i] in RM
-		}
-		
-		if (LB == CM) {
-			b_val = (float)h_B[i + 0 * B.stride()];  // B[i,0] in CM
-		} else {
-			b_val = (float)h_B[i * B.stride() + 0];  // B[i,0] in RM
-		}
-		
-		expected_c00 += a_val * b_val;
-	}
-	
-	// Get actual C[0,0]
-	float actual_c00;
-	if (LC == CM) {
-		actual_c00 = (float)h_C[0 + 0 * C.stride()];
-	} else {
-		actual_c00 = (float)h_C[0 * C.stride() + 0];
-	}
-	
-	float error = std::abs(expected_c00 - actual_c00);
-	float relative_error = error / (std::abs(expected_c00) + 1e-6f);
-	
-	std::cout << "[v017 GEMM Verification] " << call_name << ":" << std::endl;
-	std::cout << "  Expected C[0,0]: " << expected_c00 << std::endl;
-	std::cout << "  Actual C[0,0]: " << actual_c00 << std::endl;
-	std::cout << "  Absolute error: " << error << std::endl;
-	std::cout << "  Relative error: " << (relative_error * 100.0f) << "%" << std::endl;
-	
-	if (relative_error > 0.01f) {  // More than 1% error
-		std::cout << "  ⚠️ WARNING: Large error detected!" << std::endl;
-	} else {
-		std::cout << "  ✓ Verification passed" << std::endl;
-	}
-}
 
 #define CUBLAS_CHECK_THROW(x)                                                                                        \
 	do {                                                                                                                   \
@@ -241,9 +151,6 @@ void cublas_gemm(
 	float alpha = 1.0f,
 	float beta = 0.0f
 ) {
-	static int mixed_call_count = 0;
-	mixed_call_count++;
-	
 	if (A.n() != B.m()) {
 		throw std::runtime_error("Matrices A and B can not be multiplied together");
 	}
@@ -264,15 +171,6 @@ void cublas_gemm(
 	// For FP16 data with CUBLAS_COMPUTE_32F, alpha/beta should be float
 	// This provides full FP32 precision for accumulation
 
-	// Debug output for first few mixed layout calls
-	if (mixed_call_count <= 3) {
-		std::cout << "\n[cublas_gemm MIXED LAYOUT Call #" << mixed_call_count << "]" << std::endl;
-		std::cout << "  A: " << m << "x" << k << " (" << (LA == CM ? "CM" : "RM") << ", stride=" << A.stride() << ")" << std::endl;
-		std::cout << "  B: " << k << "x" << n << " (" << (LB == CM ? "CM" : "RM") << ", stride=" << B.stride() << ")" << std::endl;
-		std::cout << "  C: " << m << "x" << n << " (" << (LC == CM ? "CM" : "RM") << ", stride=" << C.stride() << ")" << std::endl;
-		std::cout << "  alpha=" << alpha << ", beta=" << beta << std::endl;
-	}
-	
 	// For mixed layouts, we need to carefully handle the transpose operations
 	// cuBLAS is column-major, so we interpret RM matrices as transposed CM matrices
 	
@@ -291,17 +189,6 @@ void cublas_gemm(
 		cublasOperation_t op_a = LA == RM ? CUBLAS_OP_N : CUBLAS_OP_T;
 		cublasOperation_t op_b = LB == RM ? CUBLAS_OP_N : CUBLAS_OP_T;
 		
-		if (mixed_call_count <= 3) {
-			std::cout << "  Output is RM, using C^T = B^T * A^T" << std::endl;
-			std::cout << "  op_b=" << (op_b == CUBLAS_OP_N ? "N" : "T") << ", op_a=" << (op_a == CUBLAS_OP_N ? "N" : "T") << std::endl;
-			std::cout << "  cuBLAS call: gemm(op_b, op_a, n=" << n << ", m=" << m << ", k=" << k << ")" << std::endl;
-			std::cout << "  ldb=" << B.stride() << ", lda=" << A.stride() << ", ldc=" << C.stride() << std::endl;
-			
-			// Print input matrix samples
-			print_matrix_sample("  Input A", A.data(), m, k, A.stride(), LA, stream);
-			print_matrix_sample("  Input B", B.data(), k, n, B.stride(), LB, stream);
-		}
-		
 		// Swap the operations to match the swapped matrices
 		CUBLAS_CHECK_THROW(cublasGemmEx(
 			cublas_handle(),
@@ -315,22 +202,10 @@ void cublas_gemm(
 			compute_type,
 			CUBLAS_GEMM_DEFAULT_TENSOR_OP
 		));
-		
-		if (mixed_call_count <= 3) {
-			print_matrix_sample("  Output C", C.data(), m, n, C.stride(), LC, stream);
-			// v017: Verify GEMM correctness
-			verify_gemm_result("Mixed Layout RM Output", A, B, C, stream);
-		}
 	} else {
 		// Output is CM: use standard approach
 		cublasOperation_t op_a = LA == RM ? CUBLAS_OP_T : CUBLAS_OP_N;
 		cublasOperation_t op_b = LB == RM ? CUBLAS_OP_T : CUBLAS_OP_N;
-		
-		if (mixed_call_count <= 3) {
-			std::cout << "  Output is CM, using standard approach" << std::endl;
-			std::cout << "  op_a=" << (op_a == CUBLAS_OP_N ? "N" : "T") << ", op_b=" << (op_b == CUBLAS_OP_N ? "N" : "T") << std::endl;
-			std::cout << "  cuBLAS call: gemm(op_a, op_b, m=" << m << ", n=" << n << ", k=" << k << ")" << std::endl;
-		}
 		
 		CUBLAS_CHECK_THROW(cublasGemmEx(
 			cublas_handle(),
@@ -344,11 +219,6 @@ void cublas_gemm(
 			compute_type,
 			CUBLAS_GEMM_DEFAULT_TENSOR_OP
 		));
-		
-		if (mixed_call_count <= 3) {
-			// v017: Verify GEMM correctness
-			verify_gemm_result("Mixed Layout CM Output", A, B, C, stream);
-		}
 	}
 }
 
@@ -356,27 +226,6 @@ void cublas_gemm(
 // Base version: C and D must have the same layout (non-const C)
 template <typename T, MatrixLayout LA, MatrixLayout LB, MatrixLayout LC>
 void fc_multiply_split_k(cudaStream_t stream, const GPUMatrix<T, LA>& A, const GPUMatrix<T, LB>& B, GPUMatrix<T, LC>& C, const GPUMatrix<T, LC>& D, int split_k_slices = 1, float beta = 0.0f) {
-	static bool first_call = true;
-	static int call_count = 0;
-	call_count++;
-	
-	if (first_call) {
-		std::cout << "[DEBUG fc_multiply_split_k] A: " << A.m() << "x" << A.n() << " layout=" << (LA == CM ? "CM" : "RM") << " stride=" << A.stride() << std::endl;
-		std::cout << "[DEBUG fc_multiply_split_k] B: " << B.m() << "x" << B.n() << " layout=" << (LB == CM ? "CM" : "RM") << " stride=" << B.stride() << std::endl;
-		std::cout << "[DEBUG fc_multiply_split_k] C: " << C.m() << "x" << C.n() << " layout=" << (LC == CM ? "CM" : "RM") << " stride=" << C.stride() << std::endl;
-		std::cout << "[DEBUG fc_multiply_split_k] split_k_slices=" << split_k_slices << " beta=" << beta << std::endl;
-		first_call = false;
-	}
-	
-	// Print first few calls for debugging
-	if (call_count <= 5) {
-		std::cout << "\n[fc_multiply_split_k Call #" << call_count << "]" << std::endl;
-		std::cout << "  A: " << A.m() << "x" << A.n() << " (" << (LA == CM ? "CM" : "RM") << ", stride=" << A.stride() << ")" << std::endl;
-		std::cout << "  B: " << B.m() << "x" << B.n() << " (" << (LB == CM ? "CM" : "RM") << ", stride=" << B.stride() << ")" << std::endl;
-		std::cout << "  C: " << C.m() << "x" << C.n() << " (" << (LC == CM ? "CM" : "RM") << ", stride=" << C.stride() << ")" << std::endl;
-		std::cout << "  split_k=" << split_k_slices << ", beta=" << beta << std::endl;
-	}
-	
 	if (C.data() != D.data()) {
 		throw std::runtime_error("fc_multiply_split_k with cuBLAS requires C and D to be the same matrix.");
 	}
@@ -406,15 +255,6 @@ void fc_multiply_split_k(cudaStream_t stream, const GPUMatrix<T, LA>& A, const G
 // This handles calls from const GPUMatrixDynamic methods like .cm() and .rm()
 template <typename T, MatrixLayout LA, MatrixLayout LB, MatrixLayout LC>
 void fc_multiply_split_k(cudaStream_t stream, const GPUMatrix<T, LA>& A, const GPUMatrix<T, LB>& B, const GPUMatrix<T, LC>& C, const GPUMatrix<T, LC>& D, int split_k_slices = 1, float beta = 0.0f) {
-	static bool first_call = true;
-	if (first_call) {
-		std::cout << "[DEBUG fc_multiply_split_k CONST] A: " << A.m() << "x" << A.n() << " layout=" << (LA == CM ? "CM" : "RM") << " stride=" << A.stride() << std::endl;
-		std::cout << "[DEBUG fc_multiply_split_k CONST] B: " << B.m() << "x" << B.n() << " layout=" << (LB == CM ? "CM" : "RM") << " stride=" << B.stride() << std::endl;
-		std::cout << "[DEBUG fc_multiply_split_k CONST] C: " << C.m() << "x" << C.n() << " layout=" << (LC == CM ? "CM" : "RM") << " stride=" << C.stride() << std::endl;
-		std::cout << "[DEBUG fc_multiply_split_k CONST] split_k_slices=" << split_k_slices << " beta=" << beta << std::endl;
-		first_call = false;
-	}
-	
 	if (C.data() != D.data()) {
 		throw std::runtime_error("fc_multiply_split_k with cuBLAS requires C and D to be the same matrix.");
 	}
@@ -511,19 +351,6 @@ void fc_multiply(
 	bool transfer = false,
 	bool sum_source = false
 ) {
-	static int fc_multiply_call_count = 0;
-	fc_multiply_call_count++;
-	
-	if (fc_multiply_call_count <= 3) {
-		std::cout << "\n[fc_multiply Call #" << fc_multiply_call_count << "]" << std::endl;
-		std::cout << "  A: " << A.m() << "x" << A.n() << " (" << (LA == CM ? "CM" : "RM") << ")" << std::endl;
-		std::cout << "  B: " << B.m() << "x" << B.n() << " (" << (LB == CM ? "CM" : "RM") << ")" << std::endl;
-		std::cout << "  C: " << C.m() << "x" << C.n() << " (" << (LC == CM ? "CM" : "RM") << ")" << std::endl;
-		std::cout << "  D: " << D.m() << "x" << D.n() << " (" << (LD == CM ? "CM" : "RM") << ")" << std::endl;
-		std::cout << "  activation=" << to_string(activation) << std::endl;
-		std::cout << "  transfer=" << transfer << ", sum_source=" << sum_source << std::endl;
-	}
-	
 	// cuBLAS does not support activation fusion or transfer operations
 	if (transfer) {
 		throw std::runtime_error("cuBLAS fc_multiply does not support transfer=true. This requires activation backward with forward values.");
@@ -543,11 +370,6 @@ void fc_multiply(
 
 	// Apply activation function if needed (not fused, separate kernel)
 	if (activation != Activation::None) {
-		if (fc_multiply_call_count <= 3) {
-			std::cout << "  Applying activation: " << to_string(activation) << std::endl;
-			print_matrix_sample("  Before activation", D.data(), D.m(), D.n(), D.stride(), LD, stream);
-		}
-		
 		const uint32_t num_elements = D.m() * D.n();
 		constexpr uint32_t N_THREADS = 128;
 		const uint32_t n_blocks = (num_elements + N_THREADS - 1) / N_THREADS;
@@ -555,10 +377,6 @@ void fc_multiply(
 		kernel_activation<T, 1><<<n_blocks, N_THREADS, 0, stream>>>(
 			num_elements, activation, D.data(), D.data()
 		);
-		
-		if (fc_multiply_call_count <= 3) {
-			print_matrix_sample("  After activation", D.data(), D.m(), D.n(), D.stride(), LD, stream);
-		}
 	}
 }
 

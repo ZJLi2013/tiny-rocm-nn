@@ -124,7 +124,7 @@ int main(int argc, char* argv[]) {
 				// {"otype", "Shampoo"},
 				{"learning_rate", 1e-2},
 				{"beta1", 0.9f},
-				{"beta2", 0.95f},  // v016: Changed from 0.99 to 0.95 to reduce second moment accumulation
+				{"beta2", 0.99f},
 				{"l2_reg", 0.0f},
 				// The following parameters are only used when the optimizer is "Shampoo".
 				{"beta3", 0.9f},
@@ -213,7 +213,7 @@ int main(int argc, char* argv[]) {
 		// Fourth step: train the model by sampling the above image and optimizing an error metric
 
 		// Various constants for the network and optimization
-		const uint32_t batch_size = 256 ;  // 1 << 18;
+		const uint32_t batch_size = 1 << 18;
 		const uint32_t n_training_steps = argc >= 4 ? atoi(argv[3]) : 2005;
 		const uint32_t n_input_dims = 2; // 2-D image coordinate
 		const uint32_t n_output_dims = 3; // RGB color
@@ -272,7 +272,6 @@ int main(int argc, char* argv[]) {
 
 			// Training step
 			{
-				// std::cout << "[DEBUG] training step: " << i << std::endl ; 
 				auto ctx = trainer->training_step(training_stream, training_batch, training_target);
 
 				if (i % std::min(interval, (uint32_t)100) == 0 || i == 100 || i == 1000 || i == 2000) {
