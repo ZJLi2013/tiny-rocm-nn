@@ -42,8 +42,6 @@
 
 #include <random>
 
-#include <tiny-cuda-nn/debug_config.h>
-
 namespace tcnn {
 
 template <typename T, typename PARAMS_T, typename COMPUTE_T=T>

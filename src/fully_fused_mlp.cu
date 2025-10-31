@@ -36,9 +36,6 @@
 
 #include <mma.h>
 
-#include <tiny-cuda-nn/debug_config.h>
-#include <cstdio> 
-
 namespace tcnn {
 
 void check_shmem_error(cudaError_t error) {

@@ -47,8 +47,6 @@
 
 #include <type_traits>
 
-#include <tiny-cuda-nn/debug_config.h> // for cutlass matrix print 
-
 namespace tcnn {
 
 #define CUTLASS_CHECK_THROW(x)                                                                                        \
@@ -348,28 +346,6 @@ void fc_multiply_split_k_impl(cudaStream_t stream, const typename Gemm::Argument
 	// Launch initialized CUTLASS kernel
 	status = gemm_op(stream);
 	CUTLASS_CHECK_THROW(status);
-#ifdef DEBUG_MODE
-	std::cout << "[DEBUG] cutlass split_k_impl print " << std::endl; 
-	auto& matA = args.ref_A ;
-	auto& matB = args.ref_B ;
-	auto& matC = args.ref_C ; 
-	int layoutA = 0 ;
-	int layoutB = 0 ;
-	int layoutC = 0 ;
-	if( std::is_same<decltype(matA.layout()), cutlass::layout::ColumnMajor>::value ){ layoutA = 1;  printf("layoutA = CM");  }
-	if( std::is_same<decltype(matB.layout()), cutlass::layout::ColumnMajor>::value ){ layoutB = 1; }
-	if( std::is_same<decltype(matC.layout()), cutlass::layout::ColumnMajor>::value ){ layoutC = 1; }
-	// printCutlassMatrix() is an external api, so TCNN::TypeCompute & cutlass is not visible  
-	if ( std::is_same<TypeCompute, cutlass::half_t>::value ){ 	
-		printCutlassMatrix<__half>(reinterpret_cast<const __half*>(matA.data()), m, k, layoutA, "split_k_matA");
-		printCutlassMatrix<__half>(reinterpret_cast<const __half*>(matB.data()), k, n, layoutB, "split_k_matB");
-		printCutlassMatrix<__half>(reinterpret_cast<const __half*>(matC.data()), m, n, layoutC, "split_k_matC");
-	}else if( std::is_same<TypeCompute, float>::value ){ 	
-		printCutlassMatrix<float>((float*)matA.data(), m, k, layoutA, "split_k_matA");
-		printCutlassMatrix<float>((float*)matB.data(), k, n, layoutB, "split_k_matB");
-		printCutlassMatrix<float>((float*)matC.data(), m, n, layoutC, "split_k_matC");
-	}
-#endif 
 }
 
 template <typename config, typename TypeA, MatrixLayout LayoutA, typename TypeB, MatrixLayout LayoutB, typename TypeC, MatrixLayout LayoutC, typename TypeD, MatrixLayout LayoutD>
