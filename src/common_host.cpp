@@ -42,10 +42,13 @@
 
 namespace tcnn {
 
+// Skip CUDA version check for ROCm/HIP builds
+#if defined(__CUDACC__) && !defined(__HIP__)
 static_assert(
 	__CUDACC_VER_MAJOR__ > 10 || (__CUDACC_VER_MAJOR__ == 10 && __CUDACC_VER_MINOR__ >= 2),
 	"tiny-cuda-nn requires at least CUDA 10.2"
 );
+#endif
 
 std::function<void(LogSeverity, const std::string&)> g_log_callback = [](LogSeverity severity, const std::string& msg) {
 	switch (severity) {
@@ -221,7 +224,12 @@ int cuda_device_count() {
 
 bool cuda_supports_virtual_memory(int device) {
 	int supports_vmm;
-	CU_CHECK_THROW(hipDeviceGetAttribute(&supports_vmm, CU_DEVICE_ATTRIBUTE_VIRTUAL_ADDRESS_MANAGEMENT_SUPPORTED, device));
+	// HIP uses hipDeviceAttributeVirtualMemoryManagementSupported instead of CUDA's CU_DEVICE_ATTRIBUTE
+	hipError_t result = hipDeviceGetAttribute(&supports_vmm, hipDeviceAttributeVirtualMemoryManagementSupported, device);
+	if (result == hipErrorInvalidValue || result == hipErrorNotSupported) {
+		return false; // Virtual memory not supported on this device/ROCm version
+	}
+	CU_CHECK_THROW(result);
 	return supports_vmm != 0;
 }
 
