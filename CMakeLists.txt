@@ -66,17 +66,17 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # Find ROCm packages
 set(ROCM_ROOT_DIR "/opt/rocm/")
 set(ROCM_INCLUDE_DIR "/opt/rocm/include/")
-set(ROCWMMA_PATH "${ROCM_INCLUDE_DIR}/rocwmma/")
-set(ROCBLAS_PATH "${ROCM_INCLUDE_DIR}/rocblas/")
 
 find_package(hip REQUIRED)
 find_package(hiprtc REQUIRED)
 find_package(rocblas REQUIRED)
 
-# Include directories
+# Include directories - add all ROCm include paths
+include_directories(${ROCM_INCLUDE_DIR})
+include_directories(${ROCM_INCLUDE_DIR}/hipblas)
+include_directories(${ROCM_INCLUDE_DIR}/rocblas)
+include_directories(${ROCM_INCLUDE_DIR}/rocwmma)
 include_directories(${HIP_INCLUDE_DIRS})
-include_directories(${rocblas_INCLUDE_DIRS})
-include_directories(${rocwmma_INCLUDE_DIRS})
 
 ###############################################################################
 # Dependencies
@@ -114,14 +114,20 @@ set(TCNN_SOURCES
 # Linker / library
 ###############################################################################
 
+# Define TCNN_MIN_GPU_ARCH for ROCm (use a value that enables all features)
+# For AMD GPUs, we use 70 which enables FullyFusedMLP and half precision
+list(APPEND TCNN_DEFINITIONS -DTCNN_MIN_GPU_ARCH=70)
+
 add_library(tiny-rocm-nn STATIC ${TCNN_SOURCES})
 target_compile_definitions(tiny-rocm-nn PUBLIC ${TCNN_DEFINITIONS})
 target_include_directories(tiny-rocm-nn PUBLIC
 	"include"
 	"dependencies"
 	"dependencies/fmt/include"
-	${ROCWMMA_PATH}
-	${ROCBLAS_PATH}
+	${ROCM_INCLUDE_DIR}
+	${ROCM_INCLUDE_DIR}/hipblas
+	${ROCM_INCLUDE_DIR}/rocblas
+	${ROCM_INCLUDE_DIR}/rocwmma
 )
 target_link_libraries(tiny-rocm-nn PUBLIC hip::device hip::host roc::rocblas fmt)
 

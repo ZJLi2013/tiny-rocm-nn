@@ -80,13 +80,19 @@
 
 #include <tiny-cuda-nn/vec.h>
 
-#if defined(__CUDA_ARCH__)
+// For ROCm/HIP, we don't check GPU architecture at compile time
+// AMD GPUs with Matrix Core support (CDNA/RDNA3) are assumed
+#if defined(__CUDA_ARCH__) && !defined(__HIP__)
 static_assert(__CUDA_ARCH__ >= TCNN_MIN_GPU_ARCH * 10, "MIN_GPU_ARCH=" STR(TCNN_MIN_GPU_ARCH) "0 must bound __CUDA_ARCH__=" STR(__CUDA_ARCH__) " from below, but doesn't.");
 #endif
 
 namespace tcnn {
 
+#ifdef TCNN_MIN_GPU_ARCH
 static constexpr uint32_t MIN_GPU_ARCH = TCNN_MIN_GPU_ARCH;
+#else
+static constexpr uint32_t MIN_GPU_ARCH = 70; // Default for ROCm
+#endif
 
 // When TCNN managed its model parameters, they are always aligned,
 // which yields performance benefits in practice. However, parameters
