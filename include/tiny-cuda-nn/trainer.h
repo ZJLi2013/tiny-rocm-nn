@@ -83,7 +83,7 @@ public:
 		parallel_for_gpu(n_params, [params_fp=m_params_full_precision, params=m_params] __device__ (size_t i) {
 			params[i] = (PARAMS_T)params_fp[i];
 		});
-		CUDA_CHECK_THROW(cudaDeviceSynchronize());
+		CUDA_CHECK_THROW(hipDeviceSynchronize());
 	}
 
 	// ForwardContext 结构体用于存储前向传播过程中的中间结果，这些结果在后续的反向传播和损失计算中是必需的。
@@ -125,7 +125,7 @@ public:
 	//
 	// @return 返回一个 `ForwardContext` 结构体，其中包含了反向传播所需的所有中间变量。
 	std::unique_ptr<ForwardContext> forward(
-		cudaStream_t stream,
+		hipStream_t stream,
 		const float loss_scale,
 		const GPUMatrixDynamic<T>& input,
 		const GPUMatrix<float>& target,
@@ -214,7 +214,7 @@ public:
 	// 3. 底层模型（例如 `NetworkWithInputEncoding`）会利用这些信息，根据链式法则计算其可训练参数的梯度，
 	//    并将这些梯度存储在 `m_param_gradients` 指向的内存中。
 	// 4. (可选) 如果 `dL_dinput` 不是 nullptr，模型还会计算并传出损失关于最开始输入的梯度。
-	void backward(cudaStream_t stream, const ForwardContext& ctx, const GPUMatrixDynamic<T>& input, GPUMatrixDynamic<T>* dL_dinput = nullptr, bool use_inference_params = false, GradientMode param_gradients_mode = GradientMode::Overwrite) {
+	void backward(hipStream_t stream, const ForwardContext& ctx, const GPUMatrixDynamic<T>& input, GPUMatrixDynamic<T>* dL_dinput = nullptr, bool use_inference_params = false, GradientMode param_gradients_mode = GradientMode::Overwrite) {
 		// 调用路径如下:
 		// 1. `m_model` 是一个 `DifferentiableObject` 指针，在我们的例子中，它指向一个 `NetworkWithInputEncoding` 对象。
 		// 2. 对 `m_model->backward()` 的调用首先进入 `DifferentiableObject` 类（在 object.h 中）的 `backward` 公有非虚方法。
@@ -230,7 +230,7 @@ public:
 		backward(nullptr, ctx, input, dL_dinput, use_inference_params, param_gradients_mode);
 	}
 
-	void optimizer_step(cudaStream_t stream, float loss_scale) {
+	void optimizer_step(hipStream_t stream, float loss_scale) {
 		m_optimizer->step(stream, loss_scale, m_params_full_precision, m_params, m_param_gradients);
 	}
 
@@ -240,7 +240,7 @@ public:
 
 	// 执行一个完整的训练步骤，包括前向传播、反向传播和（可选的）优化器更新。
 	std::unique_ptr<ForwardContext> training_step(
-		cudaStream_t stream,
+		hipStream_t stream,
 		const GPUMatrixDynamic<T>& input,
 		const GPUMatrix<float>& target,
 		const GPUMatrix<float>* data_pdf = nullptr,
@@ -279,7 +279,7 @@ public:
 		return training_step(nullptr, input, target, data_pdf, run_optimizer, dL_dinput, use_inference_params, param_gradients_mode, external_dL_dy);
 	}
 
-	float loss(cudaStream_t stream, const ForwardContext& ctx) const {
+	float loss(hipStream_t stream, const ForwardContext& ctx) const {
 		return reduce_sum(ctx.L.data(), ctx.L.n_elements(), stream);
 	}
 
@@ -320,14 +320,14 @@ public:
 		if (n_params != m_model->n_params()) {
 			throw std::runtime_error{"Can't set fp params because buffer has the wrong size."};
 		}
-		CUDA_CHECK_THROW(cudaMemcpy(m_params_full_precision, params, sizeof(float)*n_params, device_ptr ? cudaMemcpyDeviceToDevice : cudaMemcpyHostToDevice));
+		CUDA_CHECK_THROW(hipMemcpy(m_params_full_precision, params, sizeof(float)*n_params, device_ptr ? hipMemcpyDeviceToDevice : hipMemcpyHostToDevice));
 
 		parallel_for_gpu(n_params, [params_fp=m_params_full_precision, params_inference=m_params_inference] __device__ (size_t i) {
 			params_inference[i] = (PARAMS_T)params_fp[i];
 		});
 
-		CUDA_CHECK_THROW(cudaMemcpy(m_params, m_params_inference, sizeof(PARAMS_T)*n_params, cudaMemcpyDeviceToDevice));
-		CUDA_CHECK_THROW(cudaDeviceSynchronize());
+		CUDA_CHECK_THROW(hipMemcpy(m_params, m_params_inference, sizeof(PARAMS_T)*n_params, hipMemcpyDeviceToDevice));
+		CUDA_CHECK_THROW(hipDeviceSynchronize());
 	}
 
 	void set_params(const PARAMS_T* params, size_t n_params, bool device_ptr = false) {
@@ -335,14 +335,14 @@ public:
 			throw std::runtime_error{"Can't set params because buffer has the wrong size."};
 		}
 
-		CUDA_CHECK_THROW(cudaMemcpy(m_params_inference, params, sizeof(PARAMS_T)*n_params, device_ptr ? cudaMemcpyDeviceToDevice : cudaMemcpyHostToDevice));
-		CUDA_CHECK_THROW(cudaMemcpy(m_params, m_params_inference, sizeof(PARAMS_T)*n_params, cudaMemcpyDeviceToDevice));
+		CUDA_CHECK_THROW(hipMemcpy(m_params_inference, params, sizeof(PARAMS_T)*n_params, device_ptr ? hipMemcpyDeviceToDevice : hipMemcpyHostToDevice));
+		CUDA_CHECK_THROW(hipMemcpy(m_params, m_params_inference, sizeof(PARAMS_T)*n_params, hipMemcpyDeviceToDevice));
 
 		parallel_for_gpu(n_params, [params_fp=m_params_full_precision, params_inference=m_params_inference] __device__ (size_t i) {
 			params_fp[i] = (float)params_inference[i];
 		});
 
-		CUDA_CHECK_THROW(cudaDeviceSynchronize());
+		CUDA_CHECK_THROW(hipDeviceSynchronize());
 	}
 
 	std::shared_ptr<DifferentiableObject<T, PARAMS_T, COMPUTE_T>> model() {
@@ -388,7 +388,7 @@ public:
 		}
 
 		reset_param_pointers();
-		CUDA_CHECK_THROW(cudaDeviceSynchronize());
+		CUDA_CHECK_THROW(hipDeviceSynchronize());
 	}
 
 	void set_param_gradients_pointer(PARAMS_T* gradients) {

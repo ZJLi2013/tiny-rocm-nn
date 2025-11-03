@@ -90,7 +90,7 @@ public:
 
 	virtual ~NetworkWithInputEncoding() { }
 
-	void inference_mixed_precision_impl(cudaStream_t stream, const GPUMatrixDynamic<float>& input, GPUMatrixDynamic<T>& output, bool use_inference_params = true) override {
+	void inference_mixed_precision_impl(hipStream_t stream, const GPUMatrixDynamic<float>& input, GPUMatrixDynamic<T>& output, bool use_inference_params = true) override {
 		GPUMatrixDynamic<T> network_input = {m_encoding->padded_output_width(), input.n(), stream, m_encoding->preferred_output_layout()};
 		m_encoding->inference_mixed_precision(stream, input, network_input, use_inference_params);
 		m_network->inference_mixed_precision(stream, network_input, output, use_inference_params);
@@ -114,7 +114,7 @@ public:
 	 * @param prepare_input_gradients 是否为输入梯度计算做准备。
 	 * @return 返回一个包含前向传播上下文的unique_ptr，用于后续的反向传播。
 	 */
-	std::unique_ptr<Context> forward_impl(cudaStream_t stream, const GPUMatrixDynamic<float>& input, GPUMatrixDynamic<T>* output = nullptr, bool use_inference_params = false, bool prepare_input_gradients = false) override {
+	std::unique_ptr<Context> forward_impl(hipStream_t stream, const GPUMatrixDynamic<float>& input, GPUMatrixDynamic<T>* output = nullptr, bool use_inference_params = false, bool prepare_input_gradients = false) override {
 		// Make sure our temporary buffers have the correct size for the given batch size
 		uint32_t batch_size = input.n();
 
@@ -150,7 +150,7 @@ public:
 	 * @param param_gradients_mode  参数梯度的更新模式（覆盖、累加等）。
 	 */
 	void backward_impl(
-		cudaStream_t stream,
+		hipStream_t stream,
 		const Context& ctx,
 		const GPUMatrixDynamic<float>& input,
 		const GPUMatrixDynamic<T>& output,

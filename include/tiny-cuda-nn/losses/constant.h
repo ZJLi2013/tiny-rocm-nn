@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 /*
  * Copyright (c) 2020-2023, NVIDIA CORPORATION.  All rights reserved.
  *
@@ -74,7 +75,7 @@ public:
 	ConstantGradientLoss(const std::vector<float>& constant_gradient) : m_constant_gradient{constant_gradient} {}
 
 	void evaluate(
-		cudaStream_t stream,
+		hipStream_t stream,
 		const float loss_scale,
 		const GPUMatrix<T>& prediction,
 		const GPUMatrix<float>& target,
@@ -93,7 +94,7 @@ public:
 		CHECK_THROW(m_constant_gradient.size() == dims);
 
 		auto workspace = allocate_workspace(stream, dims * sizeof(float));
-		CUDA_CHECK_THROW(cudaMemcpyAsync(workspace.data(), m_constant_gradient.data(), dims * sizeof(float), cudaMemcpyHostToDevice, stream));
+		CUDA_CHECK_THROW(hipMemcpyAsync(workspace.data(), m_constant_gradient.data(), dims * sizeof(float), hipMemcpyHostToDevice, stream));
 
 		linear_kernel(constant_gradient_loss<T>, 0, stream,
 			prediction.n_elements(),

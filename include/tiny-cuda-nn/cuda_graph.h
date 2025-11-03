@@ -31,7 +31,7 @@
 
 #include <tiny-cuda-nn/common_host.h>
 
-#include <cuda.h>
+#include <hip/hip_runtime.h>
 
 #include <deque>
 #include <functional>
@@ -62,41 +62,41 @@ public:
 		}
 	}
 
-	ScopeGuard capture_guard(cudaStream_t stream) {
+	ScopeGuard capture_guard(hipStream_t stream) {
 		// Can't capture on the global stream
-		if (stream == nullptr || stream == cudaStreamLegacy) {
+		if (stream == nullptr || stream == hipStreamLegacy) {
 			return {};
 		}
 
 		// If the caller is already capturing, no need for a nested capture.
-		cudaStreamCaptureStatus capture_status;
-		CUDA_CHECK_THROW(cudaStreamIsCapturing(stream, &capture_status));
-		if (capture_status != cudaStreamCaptureStatusNone) {
+		hipStreamCaptureStatus capture_status;
+		CUDA_CHECK_THROW(hipStreamIsCapturing(stream, &capture_status));
+		if (capture_status != hipStreamCaptureStatusNone) {
 			return {};
 		}
 
-		cudaError_t capture_result = cudaStreamIsCapturing(cudaStreamLegacy, &capture_status);
-		if (capture_result == cudaErrorStreamCaptureImplicit) {
+		hipError_t capture_result = hipStreamIsCapturing(hipStreamLegacy, &capture_status);
+		if (capture_result == hipErrorStreamCaptureImplicit) {
 			return {};
 		}
 
 		CUDA_CHECK_THROW(capture_result);
-		if (capture_status != cudaStreamCaptureStatusNone) {
+		if (capture_status != hipStreamCaptureStatusNone) {
 			return {};
 		}
 
 		// Start capturing
 		if (m_graph) {
-			CUDA_CHECK_THROW(cudaGraphDestroy(m_graph));
+			CUDA_CHECK_THROW(hipGraphDestroy(m_graph));
 			m_graph = nullptr;
 		}
 
-		CUDA_CHECK_THROW(cudaStreamBeginCapture(stream, cudaStreamCaptureModeRelaxed));
+		CUDA_CHECK_THROW(hipStreamBeginCapture(stream, hipStreamCaptureModeRelaxed));
 		current_captures().push_back(this);
 
 		// Stop capturing again once the returned object goes out of scope
 		return ScopeGuard{[this, stream]() {
-			CUDA_CHECK_THROW(cudaStreamEndCapture(stream, &m_graph));
+			CUDA_CHECK_THROW(hipStreamEndCapture(stream, &m_graph));
 
 			if (current_captures().back() != this) {
 				throw std::runtime_error{"CudaGraph: must end captures in reverse order of creation."};
@@ -104,7 +104,7 @@ public:
 			current_captures().pop_back();
 
 			if (m_synchronize_when_capture_done) {
-				CUDA_CHECK_THROW(cudaDeviceSynchronize());
+				CUDA_CHECK_THROW(hipDeviceSynchronize());
 				m_synchronize_when_capture_done = false;
 			}
 
@@ -112,7 +112,7 @@ public:
 			// A corresponding exception is likely already in flight.
 			if (!m_graph) {
 				if (m_graph_instance) {
-					CUDA_CHECK_THROW(cudaGraphExecDestroy(m_graph_instance));
+					CUDA_CHECK_THROW(hipGraphExecDestroy(m_graph_instance));
 				}
 
 				m_graph = nullptr;
@@ -126,42 +126,42 @@ public:
 			if (m_graph_instance) {
 #if CUDA_VERSION >= 12000
 				cudaGraphExecUpdateResultInfo update_result;
-				CUDA_CHECK_THROW(cudaGraphExecUpdate(m_graph_instance, m_graph, &update_result));
+				CUDA_CHECK_THROW(hipGraphExecUpdate(m_graph_instance, m_graph, &update_result));
 
 				// If the update failed, reset graph instance. We will create a new one next.
-				if (update_result.result != cudaGraphExecUpdateSuccess) {
-					CUDA_CHECK_THROW(cudaGraphExecDestroy(m_graph_instance));
+				if (update_result.result != hipGraphExecUpdateSuccess) {
+					CUDA_CHECK_THROW(hipGraphExecDestroy(m_graph_instance));
 					m_graph_instance = nullptr;
 				}
 #else
-				cudaGraphExecUpdateResult update_result;
-				cudaGraphNode_t error_node;
-				CUDA_CHECK_THROW(cudaGraphExecUpdate(m_graph_instance, m_graph, &error_node, &update_result));
+				hipGraphExecUpdateResult update_result;
+				hipGraphNode_t error_node;
+				CUDA_CHECK_THROW(hipGraphExecUpdate(m_graph_instance, m_graph, &error_node, &update_result));
 
 				// If the update failed, reset graph instance. We will create a new one next.
-				if (update_result != cudaGraphExecUpdateSuccess) {
-					CUDA_CHECK_THROW(cudaGraphExecDestroy(m_graph_instance));
+				if (update_result != hipGraphExecUpdateSuccess) {
+					CUDA_CHECK_THROW(hipGraphExecDestroy(m_graph_instance));
 					m_graph_instance = nullptr;
 				}
 #endif
 			}
 
 			if (!m_graph_instance) {
-				CUDA_CHECK_THROW(cudaGraphInstantiate(&m_graph_instance, m_graph, NULL, NULL, 0));
+				CUDA_CHECK_THROW(hipGraphInstantiate(&m_graph_instance, m_graph, NULL, NULL, 0));
 			}
 
-			CUDA_CHECK_THROW(cudaGraphLaunch(m_graph_instance, stream));
+			CUDA_CHECK_THROW(hipGraphLaunch(m_graph_instance, stream));
 		}};
 	}
 
 	void reset() {
 		if (m_graph) {
-			CUDA_CHECK_THROW(cudaGraphDestroy(m_graph));
+			CUDA_CHECK_THROW(hipGraphDestroy(m_graph));
 			m_graph = nullptr;
 		}
 
 		if (m_graph_instance) {
-			CUDA_CHECK_THROW(cudaGraphExecDestroy(m_graph_instance));
+			CUDA_CHECK_THROW(hipGraphExecDestroy(m_graph_instance));
 			m_graph_instance = nullptr;
 		}
 	}
@@ -171,8 +171,8 @@ public:
 	}
 
 private:
-	cudaGraph_t m_graph = nullptr;
-	cudaGraphExec_t m_graph_instance = nullptr;
+	hipGraph_t m_graph = nullptr;
+	hipGraphExec_t m_graph_instance = nullptr;
 
 	bool m_synchronize_when_capture_done = false;
 };

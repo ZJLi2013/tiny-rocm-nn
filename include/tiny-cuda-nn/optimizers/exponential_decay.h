@@ -57,7 +57,7 @@ public:
 		m_nested->allocate(n_weights, layer_sizes);
 	}
 
-	void step(cudaStream_t stream, float loss_scale, float* weights_full_precision, T* weights, const T* gradients) override {
+	void step(hipStream_t stream, float loss_scale, float* weights_full_precision, T* weights, const T* gradients) override {
 		if (step() == 0) {
 			m_learning_rate_factor = 1.0f;
 		}

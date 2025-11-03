@@ -42,7 +42,7 @@ public:
 	virtual ~Encoding() { }
 
 	void inference_mixed_precision_impl(
-		cudaStream_t stream,
+		hipStream_t stream,
 		const GPUMatrixDynamic<float>& input,
 		GPUMatrixDynamic<T>& output,
 		bool use_inference_params = true

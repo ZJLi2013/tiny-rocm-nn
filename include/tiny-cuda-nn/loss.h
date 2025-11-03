@@ -39,7 +39,7 @@ template <typename T>
 class Loss : public ObjectWithMutableHyperparams {
 public:
 	virtual void evaluate(
-		cudaStream_t stream,
+		hipStream_t stream,
 		const float loss_scale,
 		const GPUMatrix<T>& prediction,
 		const GPUMatrix<float>& target,

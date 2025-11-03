@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 /*
  * Copyright (c) 2020-2023, NVIDIA CORPORATION.  All rights reserved.
  *
@@ -55,7 +56,7 @@ __global__ void generate_random_kernel(const size_t n_elements, RNG rng, T* __re
 }
 
 template <typename T, typename RNG, typename F>
-void generate_random(cudaStream_t stream, RNG& rng, size_t n_elements, T* out, F&& transform) {
+void generate_random(hipStream_t stream, RNG& rng, size_t n_elements, T* out, F&& transform) {
 	static constexpr size_t N_TO_GENERATE = 4;
 
 	size_t n_threads = div_round_up(n_elements, N_TO_GENERATE);
@@ -65,7 +66,7 @@ void generate_random(cudaStream_t stream, RNG& rng, size_t n_elements, T* out, F
 }
 
 template <typename T, typename RNG>
-void generate_random_uniform(cudaStream_t stream, RNG& rng, size_t n_elements, T* out, const T lower = (T)0.0, const T upper = (T)1.0) {
+void generate_random_uniform(hipStream_t stream, RNG& rng, size_t n_elements, T* out, const T lower = (T)0.0, const T upper = (T)1.0) {
 	generate_random(stream, rng, n_elements, out, [upper, lower] __device__ (T val) { return val * (upper - lower) + lower; });
 }
 
@@ -75,7 +76,7 @@ void generate_random_uniform(RNG& rng, size_t n_elements, T* out, const T lower 
 }
 
 template <typename T, typename RNG>
-void generate_random_logistic(cudaStream_t stream, RNG& rng, size_t n_elements, T* out, const T mean = (T)0.0, const T stddev = (T)1.0) {
+void generate_random_logistic(hipStream_t stream, RNG& rng, size_t n_elements, T* out, const T mean = (T)0.0, const T stddev = (T)1.0) {
 	generate_random(stream, rng, n_elements, out, [mean, stddev] __device__ (T val) { return (T)logit(val) * stddev * 0.551328895f + mean; });
 }
 

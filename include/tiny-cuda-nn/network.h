@@ -35,14 +35,14 @@
 namespace tcnn {
 
 template <typename T>
-void extract_dimension_pos_neg(cudaStream_t stream, const uint32_t num_elements, const uint32_t dim, const uint32_t fan_in, const uint32_t fan_out, const T* encoded, MatrixLayout layout, float* output);
+void extract_dimension_pos_neg(hipStream_t stream, const uint32_t num_elements, const uint32_t dim, const uint32_t fan_in, const uint32_t fan_out, const T* encoded, MatrixLayout layout, float* output);
 
 template <typename T, typename PARAMS_T=T>
 class Network : public DifferentiableObject<T, PARAMS_T, PARAMS_T> {
 public:
 	virtual ~Network() { }
 
-	void visualize_activation(cudaStream_t stream, uint32_t layer, uint32_t dimension, const GPUMatrix<T>& input, GPUMatrix<float>& output) {
+	void visualize_activation(hipStream_t stream, uint32_t layer, uint32_t dimension, const GPUMatrix<T>& input, GPUMatrix<float>& output) {
 		layer = std::min(layer, num_forward_activations()-1);
 		dimension = std::min(dimension, width(layer)-1);
 
@@ -70,7 +70,7 @@ std::string select_network(const json& network);
 uint32_t minimum_alignment(const json& network);
 
 template <typename T>
-void activation_gpu(cudaStream_t stream, const uint32_t num_elements, const Activation act, const T* in, T* out) {
+void activation_gpu(hipStream_t stream, const uint32_t num_elements, const Activation act, const T* in, T* out) {
 	static constexpr uint32_t ACTIVATION_VECTOR_SIZE = 16u / sizeof(T);
 	if (num_elements % ACTIVATION_VECTOR_SIZE != 0) {
 		throw std::runtime_error{fmt::format("activation_gpu: number of elements must be a multiple of {}", ACTIVATION_VECTOR_SIZE)};
@@ -85,7 +85,7 @@ void activation_gpu(cudaStream_t stream, const uint32_t num_elements, const Acti
 }
 
 template <typename T>
-void activation_gpu(cudaStream_t stream, Activation activation, const GPUMatrixDynamic<T>& input, GPUMatrixDynamic<T>& output) {
+void activation_gpu(hipStream_t stream, Activation activation, const GPUMatrixDynamic<T>& input, GPUMatrixDynamic<T>& output) {
 	if (input.n() != output.n() || input.m() != output.m()) {
 		throw std::runtime_error{fmt::format("Input and output don't have matching size: {} != {}", input.n(), output.n())};
 	}
@@ -94,7 +94,7 @@ void activation_gpu(cudaStream_t stream, Activation activation, const GPUMatrixD
 }
 
 template <typename T>
-void activation_backward_gpu(cudaStream_t stream, const uint32_t num_elements, const Activation act, const T* __restrict__ values, const T* gradients_out, T* gradients_in) {
+void activation_backward_gpu(hipStream_t stream, const uint32_t num_elements, const Activation act, const T* __restrict__ values, const T* gradients_out, T* gradients_in) {
 	static constexpr uint32_t ACTIVATION_VECTOR_SIZE = 16u / sizeof(T);
 	if (num_elements % ACTIVATION_VECTOR_SIZE != 0) {
 		throw std::runtime_error{fmt::format("activation_backward_gpu: number of elements must be a multiple of {}", ACTIVATION_VECTOR_SIZE)};
@@ -109,7 +109,7 @@ void activation_backward_gpu(cudaStream_t stream, const uint32_t num_elements, c
 }
 
 template <typename T>
-void activation_backward_gpu(cudaStream_t stream, Activation activation, const GPUMatrixDynamic<T>& values, GPUMatrixDynamic<T>& gradients) {
+void activation_backward_gpu(hipStream_t stream, Activation activation, const GPUMatrixDynamic<T>& values, GPUMatrixDynamic<T>& gradients) {
 	if (values.n() != gradients.n() || values.m() != gradients.m()) {
 		throw std::runtime_error{fmt::format("Values and gradients don't have matching size: {} != {}", values.n(), gradients.n())};
 	}
@@ -118,7 +118,7 @@ void activation_backward_gpu(cudaStream_t stream, Activation activation, const G
 }
 
 template <typename T>
-void activation_backward_output_gpu(cudaStream_t stream, const uint32_t num_elements, const Activation act, const T* __restrict__ output_values, const T* gradients_out, T* gradients_in) {
+void activation_backward_output_gpu(hipStream_t stream, const uint32_t num_elements, const Activation act, const T* __restrict__ output_values, const T* gradients_out, T* gradients_in) {
 	static constexpr uint32_t ACTIVATION_VECTOR_SIZE = 16u / sizeof(T);
 	if (num_elements % ACTIVATION_VECTOR_SIZE != 0) {
 		throw std::runtime_error{fmt::format("activation_backward_output_gpu: number of elements must be a multiple of {}", ACTIVATION_VECTOR_SIZE)};

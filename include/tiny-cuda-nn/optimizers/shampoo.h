@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 /*
  * Copyright (c) 2020-2023, NVIDIA CORPORATION.  All rights reserved.
  *
@@ -37,7 +38,7 @@
 #include <tiny-cuda-nn/reduce_sum.h>
 
 #include <mma.h>
-#include <cublas_v2.h>
+#include <hipblas.h>
 
 #include <stdexcept>
 #include <stdint.h>
@@ -46,25 +47,25 @@
 
 namespace tcnn {
 
-inline std::string cublasGetError(cublasStatus_t error) {
+inline std::string cublasGetError(hipblasStatus_t error) {
 	switch (error) {
-		case CUBLAS_STATUS_SUCCESS: return "CUBLAS_STATUS_SUCCESS";
-		case CUBLAS_STATUS_NOT_INITIALIZED: return "CUBLAS_STATUS_NOT_INITIALIZED";
-		case CUBLAS_STATUS_ALLOC_FAILED: return "CUBLAS_STATUS_ALLOC_FAILED";
-		case CUBLAS_STATUS_INVALID_VALUE: return "CUBLAS_STATUS_INVALID_VALUE";
-		case CUBLAS_STATUS_ARCH_MISMATCH: return "CUBLAS_STATUS_ARCH_MISMATCH";
-		case CUBLAS_STATUS_MAPPING_ERROR: return "CUBLAS_STATUS_MAPPING_ERROR";
-		case CUBLAS_STATUS_EXECUTION_FAILED: return "CUBLAS_STATUS_EXECUTION_FAILED";
-		case CUBLAS_STATUS_INTERNAL_ERROR: return "CUBLAS_STATUS_INTERNAL_ERROR";
-		case CUBLAS_STATUS_NOT_SUPPORTED: return "CUBLAS_STATUS_NOT_SUPPORTED";
+		case HIPBLAS_STATUS_SUCCESS: return "HIPBLAS_STATUS_SUCCESS";
+		case HIPBLAS_STATUS_NOT_INITIALIZED: return "HIPBLAS_STATUS_NOT_INITIALIZED";
+		case HIPBLAS_STATUS_ALLOC_FAILED: return "HIPBLAS_STATUS_ALLOC_FAILED";
+		case HIPBLAS_STATUS_INVALID_VALUE: return "HIPBLAS_STATUS_INVALID_VALUE";
+		case HIPBLAS_STATUS_ARCH_MISMATCH: return "HIPBLAS_STATUS_ARCH_MISMATCH";
+		case HIPBLAS_STATUS_MAPPING_ERROR: return "HIPBLAS_STATUS_MAPPING_ERROR";
+		case HIPBLAS_STATUS_EXECUTION_FAILED: return "HIPBLAS_STATUS_EXECUTION_FAILED";
+		case HIPBLAS_STATUS_INTERNAL_ERROR: return "HIPBLAS_STATUS_INTERNAL_ERROR";
+		case HIPBLAS_STATUS_NOT_SUPPORTED: return "HIPBLAS_STATUS_NOT_SUPPORTED";
 		default: return "<unknown>";
 	}
 }
 
 #define CUBLAS_CHECK_THROW(x)                                                                                           \
 	do {                                                                                                                \
-		cublasStatus_t _result = x;                                                                                      \
-		if (_result != CUBLAS_STATUS_SUCCESS)                                                                            \
+		hipblasStatus_t _result = x;                                                                                      \
+		if (_result != HIPBLAS_STATUS_SUCCESS)                                                                            \
 			throw std::runtime_error(std::string("CUBLAS Error: " #x " failed with error ") + cublasGetError(_result));  \
 	} while(0)
 
@@ -291,21 +292,21 @@ public:
 	ShampooOptimizer(const json& params) {
 		update_hyperparams(params);
 
-		CUBLAS_CHECK_THROW(cublasCreate(&m_cublas));
-		CUDA_CHECK_THROW(cudaEventCreate(&m_global_event));
+		CUBLAS_CHECK_THROW(hipblasCreate(&m_cublas));
+		CUDA_CHECK_THROW(hipEventCreate(&m_global_event));
 
-		cublasSetPointerMode(m_cublas, CUBLAS_POINTER_MODE_DEVICE);
+		hipblasSetPointerMode(m_cublas, HIPBLAS_POINTER_MODE_DEVICE);
 	}
 
 	~ShampooOptimizer() {
-		// cublasDestroy(m_cublas);
+		// hipblasDestroy(m_cublas);
 
 		for (size_t i = 0; i < m_streams.size(); ++i) {
-			CUDA_CHECK_PRINT(cudaEventDestroy(m_events[i]));
-			CUDA_CHECK_PRINT(cudaStreamDestroy(m_streams[i]));
+			CUDA_CHECK_PRINT(hipEventDestroy(m_events[i]));
+			CUDA_CHECK_PRINT(hipStreamDestroy(m_streams[i]));
 		}
 
-		cudaEventDestroy(m_global_event);
+		hipEventDestroy(m_global_event);
 	}
 
 	std::pair<float, float> debiased_alpha_beta(float decay) const {
@@ -415,8 +416,8 @@ public:
 		m_inverse_pth_root_buffers.resize(m_matrix_batches.size());
 
 		for (size_t i = 0; i < m_streams.size(); ++i) {
-			CUDA_CHECK_PRINT(cudaEventDestroy(m_events[i]));
-			CUDA_CHECK_PRINT(cudaStreamDestroy(m_streams[i]));
+			CUDA_CHECK_PRINT(hipEventDestroy(m_events[i]));
+			CUDA_CHECK_PRINT(hipStreamDestroy(m_streams[i]));
 		}
 
 		m_streams.resize(m_matrix_batches.size() * 3);
@@ -424,16 +425,16 @@ public:
 		m_cublas_workspaces.resize(m_matrix_batches.size() * 3);
 
 		for (size_t i = 0; i < m_streams.size(); ++i) {
-			CUDA_CHECK_THROW(cudaStreamCreate(&m_streams[i]));
-			CUDA_CHECK_THROW(cudaEventCreate(&m_events[i]));
+			CUDA_CHECK_THROW(hipStreamCreate(&m_streams[i]));
+			CUDA_CHECK_THROW(hipEventCreate(&m_events[i]));
 
 			m_cublas_workspaces[i].resize(16 * 1024 * 1024); // 16 MiB
 		}
 	}
 
 	template <typename ROOT_TYPE>
-	void inverse_pth_root_batched(cudaStream_t stream, uint32_t M, float* data, GPUMemory<ROOT_TYPE>& tmp, uint32_t n_matrices, uint32_t idx) {
-		CUBLAS_CHECK_THROW(cublasSetStream(m_cublas, stream));
+	void inverse_pth_root_batched(hipStream_t stream, uint32_t M, float* data, GPUMemory<ROOT_TYPE>& tmp, uint32_t n_matrices, uint32_t idx) {
+		CUBLAS_CHECK_THROW(hipblasSetStream(m_cublas, stream));
 
 		uint32_t n_elements = M*M;
 		uint32_t workspace_size = n_elements * 6 * n_matrices;
@@ -455,15 +456,15 @@ public:
 		ROOT_TYPE* I5      = tmp.data() + n_elements * n_matrices * 3;
 		ROOT_TYPE* sum_tmp = tmp.data() + n_elements * n_matrices * 4;
 
-		cudaDataType_t dataType;
-		cublasComputeType_t computeType;
+		hipDataType dataType;
+		hipblasComputeType_t computeType;
 
 		if (std::is_same<ROOT_TYPE, float>::value) {
-			dataType = CUDA_R_32F;
-			computeType = CUBLAS_COMPUTE_32F;
+			dataType = HIP_R_32F;
+			computeType = HIPBLAS_COMPUTE_32F;
 		} else if (std::is_same<ROOT_TYPE, double>::value) {
-			dataType = CUDA_R_64F;
-			computeType = CUBLAS_COMPUTE_64F;
+			dataType = HIP_R_64F;
+			computeType = HIPBLAS_COMPUTE_64F;
 		}
 
 		// Compute c following section 3.2 of the paper http://eprints.ma.man.ac.uk/637/1/covered/MIMS_ep2005_9.pdf
@@ -474,8 +475,8 @@ public:
 			// k=4 seems to give a reasonable amount of numerical stability and accuracy.
 
 			// A^2
-			CUBLAS_CHECK_THROW(cublasGemmStridedBatchedEx(
-				m_cublas, CUBLAS_OP_N, CUBLAS_OP_N,
+			CUBLAS_CHECK_THROW(hipblasGemmStridedBatchedEx_v2(
+				m_cublas, HIPBLAS_OP_N, HIPBLAS_OP_N,
 				M, M, M,
 				m_one_root,
 				Xk, dataType, M, n_elements,
@@ -484,12 +485,12 @@ public:
 				tmp1, dataType, M, n_elements,
 				n_matrices,
 				computeType,
-				CUBLAS_GEMM_DEFAULT
+				HIPBLAS_GEMM_DEFAULT
 			));
 
 			// A^4
-			CUBLAS_CHECK_THROW(cublasGemmStridedBatchedEx(
-				m_cublas, CUBLAS_OP_N, CUBLAS_OP_N,
+			CUBLAS_CHECK_THROW(hipblasGemmStridedBatchedEx_v2(
+				m_cublas, HIPBLAS_OP_N, HIPBLAS_OP_N,
 				M, M, M,
 				m_one_root,
 				tmp1, dataType, M, n_elements,
@@ -498,11 +499,11 @@ public:
 				tmp2, dataType, M, n_elements,
 				n_matrices,
 				computeType,
-				CUBLAS_GEMM_DEFAULT
+				HIPBLAS_GEMM_DEFAULT
 			));
 
 			// Squared norm + 4th root of that
-			cudaMemsetAsync(sum_tmp, 0, n_matrices * sizeof(ROOT_TYPE), stream);
+			hipMemsetAsync(sum_tmp, 0, n_matrices * sizeof(ROOT_TYPE), stream);
 			reduce_sum(tmp2, [] __device__ (ROOT_TYPE val) { return val * val; }, sum_tmp, n_elements, stream, n_matrices);
 		}
 
@@ -523,8 +524,8 @@ public:
 
 		// Xk+1 (one indirect copy to prevent the need for in-place operations)
 		linear_kernel(set_matrix<ROOT_TYPE>, 0, stream, n_elements*n_matrices, tmp2, Xk, 1.0f, n_matrices);
-		CUBLAS_CHECK_THROW(cublasGemmStridedBatchedEx(
-			m_cublas, CUBLAS_OP_N, CUBLAS_OP_N,
+		CUBLAS_CHECK_THROW(hipblasGemmStridedBatchedEx_v2(
+			m_cublas, HIPBLAS_OP_N, HIPBLAS_OP_N,
 			M, M, M,
 			m_one_root,
 			tmp2, dataType, M, n_elements,
@@ -533,7 +534,7 @@ public:
 			Xk, dataType, M, n_elements,
 			n_matrices,
 			computeType,
-			CUBLAS_GEMM_DEFAULT
+			HIPBLAS_GEMM_DEFAULT
 		));
 
 		// Only check every couple of iterations whether we're converging...
@@ -548,8 +549,8 @@ public:
 		while (true) {
 			for (int j = 0; j < CHECK_INTERVAL; ++j, ++i) {
 				// tmp1^2
-				CUBLAS_CHECK_THROW(cublasGemmStridedBatchedEx(
-					m_cublas, CUBLAS_OP_N, CUBLAS_OP_N,
+				CUBLAS_CHECK_THROW(hipblasGemmStridedBatchedEx_v2(
+					m_cublas, HIPBLAS_OP_N, HIPBLAS_OP_N,
 					M, M, M,
 					m_one_root,
 					tmp1, dataType, M, n_elements,
@@ -558,12 +559,12 @@ public:
 					tmp2, dataType, M, n_elements,
 					n_matrices,
 					computeType,
-					CUBLAS_GEMM_DEFAULT
+					HIPBLAS_GEMM_DEFAULT
 				));
 
 				// tmp2^2
-				CUBLAS_CHECK_THROW(cublasGemmStridedBatchedEx(
-					m_cublas, CUBLAS_OP_N, CUBLAS_OP_N,
+				CUBLAS_CHECK_THROW(hipblasGemmStridedBatchedEx_v2(
+					m_cublas, HIPBLAS_OP_N, HIPBLAS_OP_N,
 					M, M, M,
 					m_one_root,
 					tmp2, dataType, M, n_elements,
@@ -572,13 +573,13 @@ public:
 					tmp1, dataType, M, n_elements,
 					n_matrices,
 					computeType,
-					CUBLAS_GEMM_DEFAULT
+					HIPBLAS_GEMM_DEFAULT
 				));
 
 				// Mk+1 (one indirect copy to prevent the need for in-place operations)
 				linear_kernel(set_matrix<ROOT_TYPE>, 0, stream, n_elements*n_matrices, tmp2, Mk, 1.0f, n_matrices);
-				CUBLAS_CHECK_THROW(cublasGemmStridedBatchedEx(
-					m_cublas, CUBLAS_OP_N, CUBLAS_OP_N,
+				CUBLAS_CHECK_THROW(hipblasGemmStridedBatchedEx_v2(
+					m_cublas, HIPBLAS_OP_N, HIPBLAS_OP_N,
 					M, M, M,
 					m_one_root,
 					tmp1, dataType, M, n_elements,
@@ -587,7 +588,7 @@ public:
 					Mk, dataType, M, n_elements,
 					n_matrices,
 					computeType,
-					CUBLAS_GEMM_DEFAULT
+					HIPBLAS_GEMM_DEFAULT
 				));
 
 				// tmp1 = (5I - Mk) / 4
@@ -595,8 +596,8 @@ public:
 
 				// Xk+1 (one indirect copy to prevent the need for in-place operations)
 				linear_kernel(set_matrix<ROOT_TYPE>, 0, stream, n_elements*n_matrices, tmp2, Xk, 1.0f, n_matrices);
-				CUBLAS_CHECK_THROW(cublasGemmStridedBatchedEx(
-					m_cublas, CUBLAS_OP_N, CUBLAS_OP_N,
+				CUBLAS_CHECK_THROW(hipblasGemmStridedBatchedEx_v2(
+					m_cublas, HIPBLAS_OP_N, HIPBLAS_OP_N,
 					M, M, M,
 					m_one_root,
 					tmp2, dataType, M, n_elements,
@@ -605,16 +606,16 @@ public:
 					Xk, dataType, M, n_elements,
 					n_matrices,
 					computeType,
-					CUBLAS_GEMM_DEFAULT
+					HIPBLAS_GEMM_DEFAULT
 				));
 			}
 
 			linear_kernel(subtract<ROOT_TYPE>, 0, stream, n_elements*n_matrices, Xk, tmp2, tmp2, 1.0f);
 
-			CUDA_CHECK_THROW(cudaMemsetAsync(sum_tmp, 0, n_matrices * sizeof(ROOT_TYPE), stream));
+			CUDA_CHECK_THROW(hipMemsetAsync(sum_tmp, 0, n_matrices * sizeof(ROOT_TYPE), stream));
 			reduce_sum(tmp2, [] __device__ (ROOT_TYPE val) { return val * val; }, sum_tmp, n_elements, stream, n_matrices);
 
-			CUDA_CHECK_THROW(cudaMemcpyAsync(delta.data(), sum_tmp, n_matrices * sizeof(ROOT_TYPE), cudaMemcpyDeviceToHost, stream));
+			CUDA_CHECK_THROW(hipMemcpyAsync(delta.data(), sum_tmp, n_matrices * sizeof(ROOT_TYPE), hipMemcpyDeviceToHost, stream));
 
 			if (std::any_of(std::begin(delta), std::end(delta), [](ROOT_TYPE v) { return !std::isfinite(v); })) {
 				log_warning("Failed to converge: {}", delta[0]);
@@ -630,7 +631,7 @@ public:
 		}
 	}
 
-	void step(cudaStream_t stream, float loss_scale, float* weights_full_precision, T* weights, const T* gradients) override {
+	void step(hipStream_t stream, float loss_scale, float* weights_full_precision, T* weights, const T* gradients) override {
 		auto alpha_beta_1 = debiased_alpha_beta(m_beta1);
 		auto alpha_beta_2 = debiased_alpha_beta(m_beta2);
 		auto alpha_beta_3 = debiased_alpha_beta(m_beta3);
@@ -668,15 +669,15 @@ public:
 				m_first_moments.data(), m_second_moments.data(), m_momentum.data()
 			);
 
-			CUDA_CHECK_THROW(cudaMemcpyAsync(m_coefficients.data(), coefs.data(), coefs.size() * sizeof(float), cudaMemcpyHostToDevice, stream));
-			CUDA_CHECK_THROW(cudaStreamSynchronize(stream));
+			CUDA_CHECK_THROW(hipMemcpyAsync(m_coefficients.data(), coefs.data(), coefs.size() * sizeof(float), hipMemcpyHostToDevice, stream));
+			CUDA_CHECK_THROW(hipStreamSynchronize(stream));
 
 			if (m_frobenius_normalization) {
-				cudaMemsetAsync(m_sqr1_tmp.data(), 0, m_sqr1_tmp.size() * sizeof(float), stream);
-				cudaMemsetAsync(m_sqr2_tmp.data(), 0, m_sqr2_tmp.size() * sizeof(float), stream);
+				hipMemsetAsync(m_sqr1_tmp.data(), 0, m_sqr1_tmp.size() * sizeof(float), stream);
+				hipMemsetAsync(m_sqr2_tmp.data(), 0, m_sqr2_tmp.size() * sizeof(float), stream);
 			}
 
-			cudaEventRecord(m_global_event, stream);
+			hipEventRecord(m_global_event, stream);
 
 			size_t offset_MN = 0;
 			size_t offset_M = 0;
@@ -686,20 +687,20 @@ public:
 			for (size_t j = 0; j < m_matrix_batches.size(); ++j) {
 				auto interval = m_matrix_batches[j];
 
-				cudaStream_t update_stream = m_streams[j*3+0];
-				cudaStream_t L_stream = m_streams[j*3+1];
-				cudaStream_t R_stream = m_streams[j*3+2];
-				cudaEvent_t update_event = m_events[j*3+0];
-				cudaEvent_t L_event = m_events[j*3+1];
-				cudaEvent_t R_event = m_events[j*3+2];
+				hipStream_t update_stream = m_streams[j*3+0];
+				hipStream_t L_stream = m_streams[j*3+1];
+				hipStream_t R_stream = m_streams[j*3+2];
+				hipEvent_t update_event = m_events[j*3+0];
+				hipEvent_t L_event = m_events[j*3+1];
+				hipEvent_t R_event = m_events[j*3+2];
 
 				GPUMemory<char>& update_workspace = m_cublas_workspaces[j*3+0];
 				GPUMemory<char>& L_workspace = m_cublas_workspaces[j*3+1];
 				GPUMemory<char>& R_workspace = m_cublas_workspaces[j*3+2];
 
-				cudaStreamWaitEvent(update_stream, m_global_event, 0);
-				cudaStreamWaitEvent(L_stream, m_global_event, 0);
-				cudaStreamWaitEvent(R_stream, m_global_event, 0);
+				hipStreamWaitEvent(update_stream, m_global_event, 0);
+				hipStreamWaitEvent(L_stream, m_global_event, 0);
+				hipStreamWaitEvent(R_stream, m_global_event, 0);
 
 				// const GPUMatrix<T, RM> gradient_matrix(gradients + offset_MN, m_L[i].n(), m_R[i].n());
 
@@ -718,45 +719,45 @@ public:
 				float* L_root_begin = m_L_root[interval.first].data();
 				float* R_root_begin = m_R_root[interval.first].data();
 
-				cudaDataType_t data_type = (m_cg_on_momentum || std::is_same<T, float>::value) ? CUDA_R_32F : CUDA_R_16F;
+				hipDataType data_type = (m_cg_on_momentum || std::is_same<T, float>::value) ? HIP_R_32F : HIP_R_16F;
 				void* gradient_pointer = m_cg_on_momentum ? (void*)(m_momentum.data() + offset_MN) : (void*)(gradients + offset_MN);
-				cublasComputeType_t compute_type = m_cg_on_momentum ? CUBLAS_COMPUTE_32F_FAST_TF32 : CUBLAS_COMPUTE_32F;
+				hipblasComputeType_t compute_type = m_cg_on_momentum ? HIPBLAS_COMPUTE_32F_FAST_TF32 : HIPBLAS_COMPUTE_32F;
 
 				// m_L[i] = m_beta2 * m_L[i] + (1 - m_beta2) * gradient_matrix * gradient_matrix.transpose();
-				CUBLAS_CHECK_THROW(cublasSetStream(m_cublas, L_stream));
+				CUBLAS_CHECK_THROW(hipblasSetStream(m_cublas, L_stream));
 				CUBLAS_CHECK_THROW(cublasSetWorkspace(m_cublas, L_workspace.data(), L_workspace.size()));
-				CUBLAS_CHECK_THROW(cublasGemmStridedBatchedEx(
-					m_cublas, CUBLAS_OP_T, CUBLAS_OP_N,
+				CUBLAS_CHECK_THROW(hipblasGemmStridedBatchedEx_v2(
+					m_cublas, HIPBLAS_OP_T, HIPBLAS_OP_N,
 					M, M, N,
 					m_alpha_3,
 					gradient_pointer, data_type, N, gradient_stride,
 					gradient_pointer, data_type, N, gradient_stride,
 					m_beta_3,
-					L_begin, CUDA_R_32F, M, L_stride,
+					L_begin, HIP_R_32F, M, L_stride,
 					n_matrices,
 					compute_type,
 					CUBLAS_GEMM_DEFAULT_TENSOR_OP
 				));
 
-				cudaEventRecord(L_event, L_stream);
+				hipEventRecord(L_event, L_stream);
 
 				// m_R[i] = m_beta2 * m_R[i] + (1 - m_beta2) * gradient_matrix.transpose() * gradient_matrix;
-				CUBLAS_CHECK_THROW(cublasSetStream(m_cublas, R_stream));
+				CUBLAS_CHECK_THROW(hipblasSetStream(m_cublas, R_stream));
 				CUBLAS_CHECK_THROW(cublasSetWorkspace(m_cublas, R_workspace.data(), R_workspace.size()));
-				CUBLAS_CHECK_THROW(cublasGemmStridedBatchedEx(
-					m_cublas, CUBLAS_OP_N, CUBLAS_OP_T,
+				CUBLAS_CHECK_THROW(hipblasGemmStridedBatchedEx_v2(
+					m_cublas, HIPBLAS_OP_N, HIPBLAS_OP_T,
 					N, N, M,
 					m_alpha_3,
 					gradient_pointer, data_type, N, gradient_stride,
 					gradient_pointer, data_type, N, gradient_stride,
 					m_beta_3,
-					R_begin, CUDA_R_32F, N, R_stride,
+					R_begin, HIP_R_32F, N, R_stride,
 					n_matrices,
 					compute_type,
 					CUBLAS_GEMM_DEFAULT_TENSOR_OP
 				));
 
-				cudaEventRecord(R_event, R_stream);
+				hipEventRecord(R_event, R_stream);
 
 				// ======================
 				// Update step
@@ -764,34 +765,34 @@ public:
 
 				// Must wait until after the first step for the L and R matrix roots to get initialized.
 				if (m_current_step-1 > 0) {
-					CUBLAS_CHECK_THROW(cublasSetStream(m_cublas, update_stream));
+					CUBLAS_CHECK_THROW(hipblasSetStream(m_cublas, update_stream));
 					CUBLAS_CHECK_THROW(cublasSetWorkspace(m_cublas, update_workspace.data(), update_workspace.size()));
 
 					// gradient_matrix = L_root * gradients
-					CUBLAS_CHECK_THROW(cublasGemmStridedBatchedEx(
-						m_cublas, CUBLAS_OP_N, CUBLAS_OP_T,
+					CUBLAS_CHECK_THROW(hipblasGemmStridedBatchedEx_v2(
+						m_cublas, HIPBLAS_OP_N, HIPBLAS_OP_T,
 						M, N, M,
 						m_one,
-						L_root_begin, CUDA_R_32F, M, L_stride,
-						m_momentum.data() + offset_MN, CUDA_R_32F, N, gradient_stride,
+						L_root_begin, HIP_R_32F, M, L_stride,
+						m_momentum.data() + offset_MN, HIP_R_32F, N, gradient_stride,
 						m_zero,
-						m_gradient_tmp.data() + offset_MN, CUDA_R_32F, M, gradient_stride,
+						m_gradient_tmp.data() + offset_MN, HIP_R_32F, M, gradient_stride,
 						n_matrices,
-						CUBLAS_COMPUTE_32F_FAST_TF32,
+						HIPBLAS_COMPUTE_32F_FAST_TF32,
 						CUBLAS_GEMM_DEFAULT_TENSOR_OP
 					));
 
 					// gradient_matrix = gradient_matrix * R_root
-					CUBLAS_CHECK_THROW(cublasGemmStridedBatchedEx(
-						m_cublas, CUBLAS_OP_N, CUBLAS_OP_N,
+					CUBLAS_CHECK_THROW(hipblasGemmStridedBatchedEx_v2(
+						m_cublas, HIPBLAS_OP_N, HIPBLAS_OP_N,
 						M, N, N,
 						m_alpha_shampoo_coef,
-						m_gradient_tmp.data() + offset_MN, CUDA_R_32F, M, gradient_stride,
-						R_root_begin, CUDA_R_32F, N, R_stride,
+						m_gradient_tmp.data() + offset_MN, HIP_R_32F, M, gradient_stride,
+						R_root_begin, HIP_R_32F, N, R_stride,
 						m_beta_shampoo_coef,
-						m_shampoo_momentum.data() + offset_MN, CUDA_R_32F, M, gradient_stride,
+						m_shampoo_momentum.data() + offset_MN, HIP_R_32F, M, gradient_stride,
 						n_matrices,
-						CUBLAS_COMPUTE_32F_FAST_TF32,
+						HIPBLAS_COMPUTE_32F_FAST_TF32,
 						CUBLAS_GEMM_DEFAULT_TENSOR_OP
 					));
 
@@ -813,7 +814,7 @@ public:
 					);
 				}
 
-				cudaEventRecord(update_event, update_stream);
+				hipEventRecord(update_event, update_stream);
 
 				for (size_t i = interval.first; i < interval.second; ++i) {
 					offset_MN += M*N;
@@ -825,7 +826,7 @@ public:
 			}
 
 			for (auto& event : m_events) {
-				cudaStreamWaitEvent(stream, event, 0);
+				hipStreamWaitEvent(stream, event, 0);
 			}
 		}
 
@@ -1038,13 +1039,13 @@ private:
 	bool m_cg_on_momentum = true;
 	bool m_frobenius_normalization = true;
 
-	cublasHandle_t m_cublas;
+	hipblasHandle_t m_cublas;
 
-	std::vector<cudaStream_t> m_streams;
-	std::vector<cudaEvent_t> m_events;
+	std::vector<hipStream_t> m_streams;
+	std::vector<hipEvent_t> m_events;
 	std::vector<GPUMemory<char>> m_cublas_workspaces;
 
-	cudaEvent_t m_global_event;
+	hipEvent_t m_global_event;
 };
 
 }

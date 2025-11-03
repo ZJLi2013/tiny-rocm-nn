@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 /*
  * Copyright (c) 2020-2023, NVIDIA CORPORATION.  All rights reserved.
  *
@@ -75,11 +76,11 @@ public:
 		m_weights_lookahead.resize(n_weights);
 	}
 
-	void step(cudaStream_t stream, float loss_scale, float* weights_full_precision, T* weights, const T* gradients) override {
+	void step(hipStream_t stream, float loss_scale, float* weights_full_precision, T* weights, const T* gradients) override {
 		uint32_t current_step = m_nested->step();
 
 		if (current_step == 0) {
-			CUDA_CHECK_THROW(cudaMemcpy(m_weights_lookahead.data(), weights, m_weights_lookahead.size() * sizeof(T), cudaMemcpyDeviceToDevice));
+			CUDA_CHECK_THROW(hipMemcpy(m_weights_lookahead.data(), weights, m_weights_lookahead.size() * sizeof(T), hipMemcpyDeviceToDevice));
 		}
 
 		if (current_step % m_n_steps == 0) {

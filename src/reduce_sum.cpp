@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 /*
  * Copyright (c) 2020-2023, NVIDIA CORPORATION.  All rights reserved.
  *
@@ -22,47 +23,46 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-/** @file   optimizer.h
+/** @file   reduce_sum.cu
  *  @author Thomas Müller, NVIDIA
- *  @brief  API for optimizers
+ *  @brief  Wrapper around thrust's sum reduction to provide warning-free compilation.
  */
 
-#pragma once
-
-#include <tiny-cuda-nn/common.h>
-#include <tiny-cuda-nn/object.h>
-
-#include <stdint.h>
+#include <tiny-cuda-nn/reduce_sum.h>
 
 namespace tcnn {
 
-template <typename T>
-class Optimizer : public ObjectWithMutableHyperparams {
-public:
-	virtual ~Optimizer() {}
+__global__ void block_reduce1(
+	const uint32_t n_elements,
+	float* __restrict__ inout
+) {
+	const uint32_t i = threadIdx.x + blockIdx.x * blockDim.x;
 
-	virtual void allocate(uint32_t n_weights, const std::vector<std::pair<uint32_t, uint32_t>>& layer_sizes = {}) = 0;
-	void allocate(const std::shared_ptr<ParametricObject<T>>& target) {
-		allocate((uint32_t)target->n_params(), target->layer_sizes());
-	};
+	extern __shared__ float sdata[];
+	sdata[threadIdx.x] = i < n_elements ? inout[i] : 0;
 
-	virtual void step(hipStream_t stream, float loss_scale, float* weights_full_precision, T* weights, const T* gradients) = 0;
-	virtual float learning_rate() const = 0;
-	virtual void set_learning_rate(float val) = 0;
-	virtual uint32_t step() const = 0;
-	virtual uint32_t n_weights() const = 0;
-	virtual T* custom_weights() const = 0;
+	__syncthreads();
 
-	virtual size_t n_nested() const { return 0; }
-	virtual const std::shared_ptr<Optimizer<T>>& nested(size_t idx = 0) const {
-		throw std::runtime_error{"Optimizer does not support nesting."};
+	for (unsigned int s = blockDim.x / 2; s > 32; s >>= 1) {
+		if (threadIdx.x < s) {
+			sdata[threadIdx.x] += sdata[threadIdx.x + s];
+		}
+
+		__syncthreads();
 	}
 
-	virtual json serialize() const { return {}; }
-	virtual void deserialize(const json& data) { }
-};
+	if (threadIdx.x < 32) {
+		float val = sdata[threadIdx.x];
+		val = warp_reduce(val);
 
-template <typename T>
-Optimizer<T>* create_optimizer(const json& params);
+		if (threadIdx.x == 0) {
+			inout[blockIdx.x] = val;
+		}
+	}
+}
+
+uint32_t reduce_sum_workspace_size(uint32_t n_elements) {
+	return n_blocks_linear(n_elements);
+}
 
 }

@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 /*
  * Copyright (c) 2020-2023, NVIDIA CORPORATION.  All rights reserved.
  *
@@ -78,7 +79,7 @@ template <typename T>
 class L2Loss : public Loss<T> {
 public:
 	void evaluate(
-		cudaStream_t stream,
+		hipStream_t stream,
 		const float loss_scale,
 		const GPUMatrix<T>& prediction,
 		const GPUMatrix<float>& target,

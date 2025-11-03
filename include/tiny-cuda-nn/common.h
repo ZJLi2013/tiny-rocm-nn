@@ -40,8 +40,8 @@
 #include <string> 
 #include <stdexcept>
 
-#if defined(__CUDACC__)
-#  include <cuda_fp16.h>
+#if defined(__HIPCC__)
+#  include <hip/hip_fp16.h>
 #endif
 
 //////////////////////////////////////
@@ -60,7 +60,7 @@
 	#define TCNN_PRAGMA_NO_UNROLL
 #endif
 
-#ifdef __CUDACC__
+#ifdef __HIPCC__
 #  ifdef __NVCC_DIAG_PRAGMA_SUPPORT__
 #    pragma nv_diag_suppress = unsigned_compare_with_zero
 #  else
@@ -68,7 +68,7 @@
 #  endif
 #endif
 
-#if defined(__CUDACC__) || (defined(__clang__) && defined(__CUDA__))
+#if defined(__HIPCC__) || (defined(__clang__) && defined(__CUDA__))
 #define TCNN_HOST_DEVICE __host__ __device__
 #define TCNN_DEVICE __device__
 #define TCNN_HOST __host__
@@ -113,7 +113,7 @@ static constexpr bool PARAMS_ALIGNED = true;
 // 53-60, 62 |                      no |                       70 |  __half (no tensor cores)
 //  <=52, 61 |                      no |                       70 |   float (no tensor cores)
 
-#if defined(__CUDACC__)
+#if defined(__HIPCC__)
 #  if TCNN_HALF_PRECISION
 using network_precision_t = __half;
 #  else
@@ -239,7 +239,7 @@ inline constexpr TCNN_HOST_DEVICE uint32_t next_pot(uint32_t v) {
 
 template <typename T> constexpr TCNN_HOST_DEVICE float default_loss_scale();
 template <> constexpr TCNN_HOST_DEVICE float default_loss_scale<float>() { return 1.0f; }
-#ifdef __CUDACC__
+#ifdef __HIPCC__
 template <> constexpr TCNN_HOST_DEVICE float default_loss_scale<__half>() { return 128.0f; }
 #endif
 

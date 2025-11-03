@@ -35,25 +35,25 @@
 
 namespace tcnn {
 
-void free_multi_streams(cudaStream_t parent_stream);
+void free_multi_streams(hipStream_t parent_stream);
 
 // Synchronization helpers
 struct StreamAndEvent {
 public:
 	StreamAndEvent() {
-		CUDA_CHECK_THROW(cudaStreamCreate(&m_stream));
-		CUDA_CHECK_THROW(cudaEventCreate(&m_event));
+		CUDA_CHECK_THROW(hipStreamCreate(&m_stream));
+		CUDA_CHECK_THROW(hipEventCreate(&m_event));
 	}
 
 	~StreamAndEvent() {
 		if (m_stream) {
 			free_multi_streams(m_stream);
 			free_gpu_memory_arena(m_stream);
-			cudaStreamDestroy(m_stream);
+			hipStreamDestroy(m_stream);
 		}
 
 		if (m_event) {
-			cudaEventDestroy(m_event);
+			hipEventDestroy(m_event);
 		}
 	}
 
@@ -70,37 +70,37 @@ public:
 		*this = std::move(other);
 	}
 
-	void wait_for(cudaEvent_t event) {
-		CUDA_CHECK_THROW(cudaStreamWaitEvent(m_stream, event, 0));
+	void wait_for(hipEvent_t event) {
+		CUDA_CHECK_THROW(hipStreamWaitEvent(m_stream, event, 0));
 	}
 
-	void wait_for(cudaStream_t stream) {
-		CUDA_CHECK_THROW(cudaEventRecord(m_event, stream));
+	void wait_for(hipStream_t stream) {
+		CUDA_CHECK_THROW(hipEventRecord(m_event, stream));
 		wait_for(m_event);
 	}
 
-	void signal(cudaStream_t stream) {
-		CUDA_CHECK_THROW(cudaEventRecord(m_event, m_stream));
-		CUDA_CHECK_THROW(cudaStreamWaitEvent(stream, m_event, 0));
+	void signal(hipStream_t stream) {
+		CUDA_CHECK_THROW(hipEventRecord(m_event, m_stream));
+		CUDA_CHECK_THROW(hipStreamWaitEvent(stream, m_event, 0));
 	}
 
-	cudaStream_t get() {
+	hipStream_t get() {
 		return m_stream;
 	}
 
 private:
-	cudaStream_t m_stream = {};
-	cudaEvent_t m_event = {};
+	hipStream_t m_stream = {};
+	hipEvent_t m_event = {};
 };
 
 struct MultiStream {
 public:
 	MultiStream() {
-		CUDA_CHECK_THROW(cudaEventCreate(&m_event));
+		CUDA_CHECK_THROW(hipEventCreate(&m_event));
 	}
 
 	~MultiStream() {
-		cudaEventDestroy(m_event);
+		hipEventDestroy(m_event);
 	}
 
 	MultiStream& operator=(const MultiStream&) = delete;
@@ -108,18 +108,18 @@ public:
 	MultiStream& operator=(MultiStream&&) = delete;
 	MultiStream(MultiStream&&) = delete;
 
-	void signal(cudaStream_t outer_stream) {
+	void signal(hipStream_t outer_stream) {
 		for (size_t i = 0; i < m_n_streams; ++i) {
 			m_streams[i].signal(outer_stream);
 		}
 	}
 
-	void wait_for(cudaStream_t stream) {
+	void wait_for(hipStream_t stream) {
 		if (m_n_streams == 0) {
 			return;
 		}
 
-		CUDA_CHECK_THROW(cudaEventRecord(m_event, stream));
+		CUDA_CHECK_THROW(hipEventRecord(m_event, stream));
 		for (size_t i = 0; i < m_n_streams; ++i) {
 			m_streams[i].wait_for(m_event);
 		}
@@ -132,7 +132,7 @@ public:
 		m_n_streams = n_streams;
 	}
 
-	cudaStream_t get(size_t idx) {
+	hipStream_t get(size_t idx) {
 		if (idx >= m_n_streams) {
 			throw std::runtime_error{fmt::format("MultiStream: invalid stream index requested: {}/{}", idx, m_n_streams)};
 		}
@@ -144,11 +144,11 @@ private:
 	// May be less than m_streams.size()!
 	// The user may only need to sync fewer than that.
 	size_t m_n_streams = 0;
-	cudaEvent_t m_event;
+	hipEvent_t m_event;
 };
 
-inline std::unordered_map<cudaStream_t, std::stack<std::shared_ptr<MultiStream>>>& stream_multi_streams() {
-	static auto* stream_multi_streams = new std::unordered_map<cudaStream_t, std::stack<std::shared_ptr<MultiStream>>>{};
+inline std::unordered_map<hipStream_t, std::stack<std::shared_ptr<MultiStream>>>& stream_multi_streams() {
+	static auto* stream_multi_streams = new std::unordered_map<hipStream_t, std::stack<std::shared_ptr<MultiStream>>>{};
 	return *stream_multi_streams;
 }
 
@@ -157,11 +157,11 @@ inline std::unordered_map<int, std::stack<std::shared_ptr<MultiStream>>>& global
 	return *global_multi_streams;
 }
 
-inline std::stack<std::shared_ptr<MultiStream>>& get_multi_stream_stack(cudaStream_t parent_stream) {
+inline std::stack<std::shared_ptr<MultiStream>>& get_multi_stream_stack(hipStream_t parent_stream) {
 	return parent_stream ? stream_multi_streams()[parent_stream] : global_multi_streams()[cuda_device()];
 }
 
-inline void free_multi_streams(cudaStream_t parent_stream) {
+inline void free_multi_streams(hipStream_t parent_stream) {
 	CHECK_THROW(parent_stream);
 
 	// Copy the multi stream shared_ptr's into a separate variable,
@@ -171,7 +171,7 @@ inline void free_multi_streams(cudaStream_t parent_stream) {
 	stream_multi_streams().erase(parent_stream);
 }
 
-inline std::shared_ptr<MultiStream> reserve_multi_stream(cudaStream_t parent_stream, size_t n_streams) {
+inline std::shared_ptr<MultiStream> reserve_multi_stream(hipStream_t parent_stream, size_t n_streams) {
 	auto& stack = get_multi_stream_stack(parent_stream);
 	if (stack.empty()) {
 		stack.push(std::make_shared<MultiStream>());
@@ -183,7 +183,7 @@ inline std::shared_ptr<MultiStream> reserve_multi_stream(cudaStream_t parent_str
 	return result;
 }
 
-inline void return_multi_stream(cudaStream_t parent_stream, std::shared_ptr<MultiStream> multi_stream) {
+inline void return_multi_stream(hipStream_t parent_stream, std::shared_ptr<MultiStream> multi_stream) {
 	if (parent_stream ? (stream_multi_streams().count(parent_stream) == 0) : (global_multi_streams().count(cuda_device()) == 0)) {
 		throw std::runtime_error{"Attempted to return multi stream to the wrong parent stream."};
 	}
@@ -196,7 +196,7 @@ inline void return_multi_stream(cudaStream_t parent_stream, std::shared_ptr<Mult
 struct SyncedMultiStream {
 public:
 	SyncedMultiStream() = default;
-	SyncedMultiStream(cudaStream_t stream, size_t n_streams) : m_main_stream{stream}, m_n_streams{n_streams} {
+	SyncedMultiStream(hipStream_t stream, size_t n_streams) : m_main_stream{stream}, m_n_streams{n_streams} {
 		if (m_n_streams == 0) {
 			throw std::runtime_error{"SyncedMultiStream: must request at least one stream"};
 		} else if (m_n_streams == 1) {
@@ -229,7 +229,7 @@ public:
 		*this = std::move(other);
 	}
 
-	cudaStream_t get(size_t idx) {
+	hipStream_t get(size_t idx) {
 		if (m_n_streams == 0) {
 			throw std::runtime_error{"SyncedMultiStream: must have at least one stream"};
 		}
@@ -247,7 +247,7 @@ public:
 
 private:
 	std::shared_ptr<MultiStream> m_multi_stream = nullptr;
-	cudaStream_t m_main_stream = nullptr;
+	hipStream_t m_main_stream = nullptr;
 	size_t m_n_streams = 0;
 };
 

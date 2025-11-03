@@ -35,7 +35,7 @@
 #include <tiny-cuda-nn/common_host.h>
 #include <tiny-cuda-nn/cuda_graph.h>
 
-#include <cuda.h>
+#include <hip/hip_runtime.h>
 
 #include <algorithm>
 #include <atomic>
@@ -94,12 +94,12 @@ public:
 			return;
 		uint8_t buf[DEBUG_GUARD_SIZE];
 		const uint8_t *rawptr=(const uint8_t *)m_data;
-		cudaMemcpy(buf, rawptr-DEBUG_GUARD_SIZE, DEBUG_GUARD_SIZE, cudaMemcpyDeviceToHost);
+		hipMemcpy(buf, rawptr-DEBUG_GUARD_SIZE, DEBUG_GUARD_SIZE, hipMemcpyDeviceToHost);
 		for (int i=0;i<DEBUG_GUARD_SIZE;++i) if (buf[i] != 0xff) {
 			printf("TRASH BEFORE BLOCK offset %d data %p, read 0x%02x expected 0xff!\n", i, m_data, buf[i] );
 			break;
 		}
-		cudaMemcpy(buf, rawptr+m_size*sizeof(T), DEBUG_GUARD_SIZE, cudaMemcpyDeviceToHost);
+		hipMemcpy(buf, rawptr+m_size*sizeof(T), DEBUG_GUARD_SIZE, hipMemcpyDeviceToHost);
 		for (int i=0;i<DEBUG_GUARD_SIZE;++i) if (buf[i] != 0xfe) {
 			printf("TRASH AFTER BLOCK offset %d data %p, read 0x%02x expected 0xfe!\n", i, m_data, buf[i] );
 			break;
@@ -116,13 +116,13 @@ public:
 
 		uint8_t* rawptr = nullptr;
 		if (m_managed) {
-			CUDA_CHECK_THROW(cudaMallocManaged((void**)&rawptr, n_bytes+DEBUG_GUARD_SIZE*2));
+			CUDA_CHECK_THROW(hipMallocManaged((void**)&rawptr, n_bytes+DEBUG_GUARD_SIZE*2));
 		} else {
-			CUDA_CHECK_THROW(cudaMalloc((void**)&rawptr, n_bytes+DEBUG_GUARD_SIZE*2));
+			CUDA_CHECK_THROW(hipMalloc((void**)&rawptr, n_bytes+DEBUG_GUARD_SIZE*2));
 		}
 #if DEBUG_GUARD_SIZE > 0
-		CUDA_CHECK_THROW(cudaMemset(rawptr, 0xff, DEBUG_GUARD_SIZE));
-		CUDA_CHECK_THROW(cudaMemset(rawptr + n_bytes + DEBUG_GUARD_SIZE, 0xfe, DEBUG_GUARD_SIZE));
+		CUDA_CHECK_THROW(hipMemset(rawptr, 0xff, DEBUG_GUARD_SIZE));
+		CUDA_CHECK_THROW(hipMemset(rawptr + n_bytes + DEBUG_GUARD_SIZE, 0xfe, DEBUG_GUARD_SIZE));
 #endif
 		if (rawptr) rawptr += DEBUG_GUARD_SIZE;
 		m_data = (T*)(rawptr);
@@ -136,7 +136,7 @@ public:
 
 		uint8_t *rawptr = (uint8_t*)m_data;
 		if (rawptr) rawptr -= DEBUG_GUARD_SIZE;
-		CUDA_CHECK_THROW(cudaFree(rawptr));
+		CUDA_CHECK_THROW(hipFree(rawptr));
 
 		total_n_bytes_allocated() -= get_bytes();
 
@@ -204,7 +204,7 @@ public:
 			throw std::runtime_error{fmt::format("Could not set memory: Number of elements {}+{} larger than allocated memory {}.", num_elements, offset, m_size)};
 		}
 
-		CUDA_CHECK_THROW(cudaMemset(m_data + offset, value, num_elements * sizeof(T)));
+		CUDA_CHECK_THROW(hipMemset(m_data + offset, value, num_elements * sizeof(T)));
 	}
 
 	/// Sets the memory of the all elements to value
@@ -218,7 +218,7 @@ public:
 	 */
 	/// Copy data of num_elements from the raw pointer on the host
 	void copy_from_host(const T* host_data, const size_t num_elements) {
-		CUDA_CHECK_THROW(cudaMemcpy(data(), host_data, num_elements * sizeof(T), cudaMemcpyHostToDevice));
+		CUDA_CHECK_THROW(hipMemcpy(data(), host_data, num_elements * sizeof(T), hipMemcpyHostToDevice));
 	}
 
 	/// Copy num_elements from the host vector
@@ -280,7 +280,7 @@ public:
 			throw std::runtime_error{fmt::format("Trying to copy {} elements, but memory size is only {}.", num_elements, m_size)};
 		}
 
-		CUDA_CHECK_THROW(cudaMemcpy(host_data, data(), num_elements * sizeof(T), cudaMemcpyDeviceToHost));
+		CUDA_CHECK_THROW(hipMemcpy(host_data, data(), num_elements * sizeof(T), hipMemcpyDeviceToHost));
 	}
 
 	/// Copies num_elements from the device to a vector on the host
@@ -316,7 +316,7 @@ public:
 			resize(size);
 		}
 
-		CUDA_CHECK_THROW(cudaMemcpy(m_data, other.m_data, size * sizeof(T), cudaMemcpyDeviceToDevice));
+		CUDA_CHECK_THROW(hipMemcpy(m_data, other.m_data, size * sizeof(T), hipMemcpyDeviceToDevice));
 	}
 
 	/// Copies data from another device array to this one, automatically resizing it
@@ -439,7 +439,7 @@ public:
 		// to exhaust all available addresses (even if multiple GPUMemoryArenas are
 		// used simultaneously), while also ensuring that we never exhaust the
 		// reserved address range without running out of physical memory beforehand.
-		if (cuda_supports_virtual_memory() && cuMemAddressReserve(&m_base_address, m_max_size, 0, 0, 0) == CUDA_SUCCESS) {
+		if (cuda_supports_virtual_memory() && hipMemAddressReserve(&m_base_address, m_max_size, 0, 0, 0) == hipSuccess) {
 			return;
 		}
 
@@ -473,18 +473,18 @@ public:
 			set_cuda_device(m_device);
 			ScopeGuard revert_device = {[&]() { set_cuda_device(previous_device); }};
 
-			CUDA_CHECK_THROW(cudaDeviceSynchronize());
+			CUDA_CHECK_THROW(hipDeviceSynchronize());
 
 			if (m_base_address) {
 				total_n_bytes_allocated() -= m_size;
 
-				CU_CHECK_THROW(cuMemUnmap(m_base_address, m_size));
+				CU_CHECK_THROW(hipMemUnmap(m_base_address, m_size));
 
 				for (const auto& handle : m_handles) {
-					CU_CHECK_THROW(cuMemRelease(handle));
+					CU_CHECK_THROW(hipMemRelease(handle));
 				}
 
-				CU_CHECK_THROW(cuMemAddressFree(m_base_address, m_max_size));
+				CU_CHECK_THROW(hipMemAddressFree(m_base_address, m_max_size));
 			}
 		} catch (const std::runtime_error& error) {
 			// Don't need to report on memory-free problems when the driver is shutting down.
@@ -562,12 +562,12 @@ public:
 		if (m_fallback_memory) {
 			static const double GROWTH_FACTOR = 1.5;
 
-			CUDA_CHECK_THROW(cudaDeviceSynchronize());
+			CUDA_CHECK_THROW(hipDeviceSynchronize());
 
 			m_size = next_multiple((size_t)(n_bytes * GROWTH_FACTOR), cuda_memory_granularity());
 			m_fallback_memory = std::make_shared<GPUMemory<uint8_t>>(m_fallback_memory->copy(m_size));
 
-			CUDA_CHECK_THROW(cudaDeviceSynchronize());
+			CUDA_CHECK_THROW(hipDeviceSynchronize());
 
 			return;
 		}
@@ -575,21 +575,21 @@ public:
 		size_t n_bytes_to_allocate = n_bytes - m_size;
 		n_bytes_to_allocate = next_multiple(n_bytes_to_allocate, cuda_memory_granularity());
 
-		CUmemAllocationProp prop = {};
-		prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
-		prop.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+		hipMemAllocationProp prop = {};
+		prop.type = hipMemAllocationTypePinned;
+		prop.location.type = hipMemLocationTypeDevice;
 		prop.location.id = m_device;
 
 		m_handles.emplace_back();
-		CU_CHECK_THROW(cuMemCreate(&m_handles.back(), n_bytes_to_allocate, &prop, 0));
+		CU_CHECK_THROW(hipMemCreate(&m_handles.back(), n_bytes_to_allocate, &prop, 0));
 
-		CUmemAccessDesc access_desc = {};
-		access_desc.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+		hipMemAccessDesc access_desc = {};
+		access_desc.location.type = hipMemLocationTypeDevice;
 		access_desc.location.id = prop.location.id;
-		access_desc.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+		access_desc.flags = hipMemAccessFlagsProtReadWrite;
 
-		CU_CHECK_THROW(cuMemMap(m_base_address + m_size, n_bytes_to_allocate, 0, m_handles.back(), 0));
-		CU_CHECK_THROW(cuMemSetAccess(m_base_address + m_size, n_bytes_to_allocate, &access_desc, 1));
+		CU_CHECK_THROW(hipMemMap(m_base_address + m_size, n_bytes_to_allocate, 0, m_handles.back(), 0));
+		CU_CHECK_THROW(hipMemSetAccess(m_base_address + m_size, n_bytes_to_allocate, &access_desc, 1));
 		m_size += n_bytes_to_allocate;
 
 		total_n_bytes_allocated() += n_bytes_to_allocate;
@@ -598,7 +598,7 @@ public:
 		if (current_capture()) {
 			current_capture()->schedule_synchronize();
 		} else {
-			CUDA_CHECK_THROW(cudaDeviceSynchronize());
+			CUDA_CHECK_THROW(hipDeviceSynchronize());
 		}
 	}
 
@@ -613,7 +613,7 @@ public:
 	class Allocation {
 	public:
 		Allocation() = default;
-		Allocation(cudaStream_t stream, size_t offset, const std::shared_ptr<GPUMemoryArena>& workspace)
+		Allocation(hipStream_t stream, size_t offset, const std::shared_ptr<GPUMemoryArena>& workspace)
 		: m_stream{stream}, m_data{workspace->data() + offset}, m_offset{offset}, m_workspace{workspace}, m_backing_memory{workspace->backing_memory()}
 		{}
 
@@ -646,12 +646,12 @@ public:
 			return m_data;
 		}
 
-		cudaStream_t stream() const {
+		hipStream_t stream() const {
 			return m_stream;
 		}
 
 	private:
-		cudaStream_t m_stream = nullptr;
+		hipStream_t m_stream = nullptr;
 		uint8_t* m_data = nullptr;
 		size_t m_offset = 0;
 		std::shared_ptr<GPUMemoryArena> m_workspace = nullptr;
@@ -683,10 +683,10 @@ private:
 	std::unordered_map<size_t, size_t> m_allocated_intervals;
 
 	int m_device = 0;
-	CUdeviceptr m_base_address = {};
+	hipDeviceptr_t m_base_address = {};
 	size_t m_size = 0;
 
-	std::vector<CUmemGenericAllocationHandle> m_handles;
+	std::vector<hipMemGenericAllocationHandle_t> m_handles;
 
 	// Used then virtual memory isn't supported.
 	// Requires more storage + memcpy, but is more portable.
@@ -696,8 +696,8 @@ private:
 	size_t m_max_size;
 };
 
-inline std::unordered_map<cudaStream_t, std::shared_ptr<GPUMemoryArena>>& stream_gpu_memory_arenas() {
-	static auto* stream_gpu_memory_arenas = new std::unordered_map<cudaStream_t, std::shared_ptr<GPUMemoryArena>>{};
+inline std::unordered_map<hipStream_t, std::shared_ptr<GPUMemoryArena>>& stream_gpu_memory_arenas() {
+	static auto* stream_gpu_memory_arenas = new std::unordered_map<hipStream_t, std::shared_ptr<GPUMemoryArena>>{};
 	return *stream_gpu_memory_arenas;
 }
 
@@ -706,7 +706,7 @@ inline std::unordered_map<int, std::shared_ptr<GPUMemoryArena>>& global_gpu_memo
 	return *global_gpu_memory_arenas;
 }
 
-inline GPUMemoryArena::Allocation allocate_workspace(cudaStream_t stream, size_t n_bytes) {
+inline GPUMemoryArena::Allocation allocate_workspace(hipStream_t stream, size_t n_bytes) {
 	if (n_bytes == 0) {
 		// Return a null allocation if no bytes were requested.
 		return {};
@@ -724,23 +724,23 @@ inline size_t align_to_cacheline(size_t bytes) {
 }
 
 template <typename First, typename FirstSize>
-std::tuple<First*> allocate_workspace_and_distribute(cudaStream_t stream, GPUMemoryArena::Allocation* alloc, size_t offset, FirstSize first_size) {
+std::tuple<First*> allocate_workspace_and_distribute(hipStream_t stream, GPUMemoryArena::Allocation* alloc, size_t offset, FirstSize first_size) {
 	*alloc = allocate_workspace(stream, offset + align_to_cacheline(first_size * sizeof(First)));
 	return std::make_tuple<First*>((First*)(alloc->data() + offset));
 }
 
 template <typename First, typename ...Types, typename FirstSize, typename ...Sizes, std::enable_if_t<sizeof...(Types) != 0 && sizeof...(Types) == sizeof...(Sizes), int> = 0>
-std::tuple<First*, Types*...> allocate_workspace_and_distribute(cudaStream_t stream, GPUMemoryArena::Allocation* alloc, size_t offset, FirstSize first_size, Sizes... sizes) {
+std::tuple<First*, Types*...> allocate_workspace_and_distribute(hipStream_t stream, GPUMemoryArena::Allocation* alloc, size_t offset, FirstSize first_size, Sizes... sizes) {
 	auto nested = allocate_workspace_and_distribute<Types...>(stream, alloc, offset + align_to_cacheline(first_size * sizeof(First)), sizes...);
 	return std::tuple_cat(std::make_tuple<First*>((First*)(alloc->data() + offset)), nested);
 }
 
 template <typename ...Types, typename ...Sizes, std::enable_if_t<sizeof...(Types) == sizeof...(Sizes), int> = 0>
-std::tuple<Types*...> allocate_workspace_and_distribute(cudaStream_t stream, GPUMemoryArena::Allocation* alloc, Sizes... sizes) {
+std::tuple<Types*...> allocate_workspace_and_distribute(hipStream_t stream, GPUMemoryArena::Allocation* alloc, Sizes... sizes) {
 	return allocate_workspace_and_distribute<Types...>(stream, alloc, (size_t)0, sizes...);
 }
 
-inline void free_gpu_memory_arena(cudaStream_t stream) {
+inline void free_gpu_memory_arena(hipStream_t stream) {
 	if (stream) {
 		stream_gpu_memory_arenas().erase(stream);
 	} else {

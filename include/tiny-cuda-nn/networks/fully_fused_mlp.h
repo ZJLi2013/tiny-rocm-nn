@@ -34,7 +34,7 @@
 #include <tiny-cuda-nn/network.h>
 #include <tiny-cuda-nn/gpu_matrix.h>
 #include <tiny-cuda-nn/gpu_memory.h>
-#include <cublas_v2.h>
+#include <hipblas.h>
 
 #include <vector>
 
@@ -45,12 +45,12 @@ class FullyFusedMLP : public Network<T> {
 public:
 	FullyFusedMLP(uint32_t input_width, uint32_t output_width, uint32_t n_hidden_layers, Activation activation, Activation output_activation);
 
-	void inference_mixed_precision_impl(cudaStream_t stream, const GPUMatrixDynamic<T>& input, GPUMatrixDynamic<T>& output, bool use_inference_params = true) override;
+	void inference_mixed_precision_impl(hipStream_t stream, const GPUMatrixDynamic<T>& input, GPUMatrixDynamic<T>& output, bool use_inference_params = true) override;
 
-	std::unique_ptr<Context> forward_impl(cudaStream_t stream, const GPUMatrixDynamic<T>& input, GPUMatrixDynamic<T>* output = nullptr, bool use_inference_params = false, bool prepare_input_gradients = false) override;
+	std::unique_ptr<Context> forward_impl(hipStream_t stream, const GPUMatrixDynamic<T>& input, GPUMatrixDynamic<T>* output = nullptr, bool use_inference_params = false, bool prepare_input_gradients = false) override;
 
 	void backward_impl(
-		cudaStream_t stream,
+		hipStream_t stream,
 		const Context& ctx,
 		const GPUMatrixDynamic<T>& input,
 		const GPUMatrixDynamic<T>& output,
@@ -151,7 +151,7 @@ private:
 		GPUMemoryArena::Allocation alloc;
 	};
 
-	std::unique_ptr<ForwardContext> allocate_forward_buffers(cudaStream_t stream, uint32_t batch_size);
+	std::unique_ptr<ForwardContext> allocate_forward_buffers(hipStream_t stream, uint32_t batch_size);
 
 	uint32_t m_n_hidden_layers;
 	uint32_t m_n_hidden_matmuls;

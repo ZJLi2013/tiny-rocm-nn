@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 /*
  * Copyright (c) 2020-2023, NVIDIA CORPORATION.  All rights reserved.
  *
@@ -114,7 +115,7 @@ __global__ void block_reduce(
 }
 
 template <typename T, typename T_OUT, typename F>
-void reduce_sum(T* device_pointer, F fun, T_OUT* workspace, uint32_t n_elements, cudaStream_t stream, uint32_t n_sums = 1) {
+void reduce_sum(T* device_pointer, F fun, T_OUT* workspace, uint32_t n_elements, hipStream_t stream, uint32_t n_sums = 1) {
 	const uint32_t threads = 1024;
 
 	const uint32_t N_ELEMS_PER_LOAD = 16 / sizeof(T);
@@ -132,26 +133,26 @@ void reduce_sum(T* device_pointer, F fun, T_OUT* workspace, uint32_t n_elements,
 }
 
 template <typename T>
-void reduce_sum(T* device_pointer, float* workspace, uint32_t n_elements, cudaStream_t stream) {
+void reduce_sum(T* device_pointer, float* workspace, uint32_t n_elements, hipStream_t stream) {
 	reduce_sum(device_pointer, [] __device__ (float val) { return val; }, workspace, n_elements, stream);
 }
 
 template <typename T, typename F>
-float reduce_sum(T* device_pointer, F fun, uint32_t n_elements, cudaStream_t stream) {
+float reduce_sum(T* device_pointer, F fun, uint32_t n_elements, hipStream_t stream) {
 	auto workspace = allocate_workspace(stream, reduce_sum_workspace_size(n_elements) * sizeof(float));
 	float* workspace_data = (float*)workspace.data();
 
-	CUDA_CHECK_THROW(cudaMemsetAsync(workspace_data, 0, sizeof(float), stream));
+	CUDA_CHECK_THROW(hipMemsetAsync(workspace_data, 0, sizeof(float), stream));
 	reduce_sum(device_pointer, fun, workspace_data, n_elements, stream);
 
 	float sum;
-	CUDA_CHECK_THROW(cudaMemcpyAsync(&sum, workspace_data, sizeof(float), cudaMemcpyDeviceToHost, stream));
-	CUDA_CHECK_THROW(cudaStreamSynchronize(stream));
+	CUDA_CHECK_THROW(hipMemcpyAsync(&sum, workspace_data, sizeof(float), hipMemcpyDeviceToHost, stream));
+	CUDA_CHECK_THROW(hipStreamSynchronize(stream));
 	return sum;
 }
 
 template <typename T>
-float reduce_sum(T* device_pointer, uint32_t n_elements, cudaStream_t stream) {
+float reduce_sum(T* device_pointer, uint32_t n_elements, hipStream_t stream) {
 	return reduce_sum(device_pointer, [] __device__ (float val) { return val; }, n_elements, stream);
 }
 
@@ -193,7 +194,7 @@ __global__ void block_reduce1(
 );
 
 template <typename T, typename F>
-void reduce_sum_old(T* device_pointer, F fun, float* workspace, uint32_t n_elements, cudaStream_t stream) {
+void reduce_sum_old(T* device_pointer, F fun, float* workspace, uint32_t n_elements, hipStream_t stream) {
 	linear_kernel(block_reduce0<T, F>, sizeof(float) * N_THREADS_LINEAR, stream, n_elements, fun, device_pointer, workspace);
 
 	n_elements = n_blocks_linear(n_elements);

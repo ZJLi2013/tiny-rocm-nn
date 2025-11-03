@@ -104,13 +104,13 @@ private:
 };
 
 template <typename T>
-void one_hot_batched(cudaStream_t stream, const uint32_t num_elements, const uint32_t width, const uint32_t one_hot_dim, T* out, float scale);
+void one_hot_batched(hipStream_t stream, const uint32_t num_elements, const uint32_t width, const uint32_t one_hot_dim, T* out, float scale);
 
 template <typename T>
-void mult(cudaStream_t stream, const uint32_t num_elements, T* inout, float factor);
+void mult(hipStream_t stream, const uint32_t num_elements, T* inout, float factor);
 
 template <typename T>
-void trim_and_cast_from(cudaStream_t stream, const MatrixLayout layout, const uint32_t num_elements, const uint32_t input_width, const uint32_t output_width, const T* in, float* out);
+void trim_and_cast_from(hipStream_t stream, const MatrixLayout layout, const uint32_t num_elements, const uint32_t input_width, const uint32_t output_width, const T* in, float* out);
 
 enum class GradientMode {
 	Ignore,
@@ -123,8 +123,8 @@ class DifferentiableObject : public ParametricObject<PARAMS_T> {
 public:
 	virtual ~DifferentiableObject() { }
 
-	virtual void inference_mixed_precision_impl(cudaStream_t stream, const GPUMatrixDynamic<T>& input, GPUMatrixDynamic<COMPUTE_T>& output, bool use_inference_params = true) = 0;
-	void inference_mixed_precision(cudaStream_t stream, const GPUMatrixDynamic<T>& input, GPUMatrixDynamic<COMPUTE_T>& output, bool use_inference_params = true) {
+	virtual void inference_mixed_precision_impl(hipStream_t stream, const GPUMatrixDynamic<T>& input, GPUMatrixDynamic<COMPUTE_T>& output, bool use_inference_params = true) = 0;
+	void inference_mixed_precision(hipStream_t stream, const GPUMatrixDynamic<T>& input, GPUMatrixDynamic<COMPUTE_T>& output, bool use_inference_params = true) {
 		CHECK_THROW(input.m() == input_width());
 		CHECK_THROW(output.m() == padded_output_width());
 		CHECK_THROW(input.n() % BATCH_SIZE_GRANULARITY == 0);
@@ -144,7 +144,7 @@ public:
 		inference_mixed_precision(nullptr, input, output, use_inference_params);
 	}
 
-	void inference(cudaStream_t stream, const GPUMatrixDynamic<T>& input, GPUMatrixDynamic<float>& output, bool use_inference_params = true) {
+	void inference(hipStream_t stream, const GPUMatrixDynamic<T>& input, GPUMatrixDynamic<float>& output, bool use_inference_params = true) {
 		CHECK_THROW(input.m() == input_width());
 		CHECK_THROW(output.m() == output_width());
 		CHECK_THROW(input.n() % BATCH_SIZE_GRANULARITY == 0);
@@ -179,14 +179,14 @@ public:
 	}
 
 	virtual std::unique_ptr<Context> forward_impl(
-		cudaStream_t stream,
+		hipStream_t stream,
 		const GPUMatrixDynamic<T>& input,
 		GPUMatrixDynamic<COMPUTE_T>* output = nullptr,
 		bool use_inference_params = false,
 		bool prepare_input_gradients = false
 	) = 0;
 	std::unique_ptr<Context> forward(
-		cudaStream_t stream,
+		hipStream_t stream,
 		const GPUMatrixDynamic<T>& input,
 		GPUMatrixDynamic<COMPUTE_T>* output = nullptr,
 		bool use_inference_params = false,
@@ -217,7 +217,7 @@ public:
 	}
 
 	virtual void backward_impl(
-		cudaStream_t stream,
+		hipStream_t stream,
 		const Context& ctx,
 		const GPUMatrixDynamic<T>& input,
 		const GPUMatrixDynamic<COMPUTE_T>& output,
@@ -227,7 +227,7 @@ public:
 		GradientMode param_gradients_mode = GradientMode::Overwrite
 	) = 0;
 	void backward(
-		cudaStream_t stream,
+		hipStream_t stream,
 		const Context& ctx,
 		const GPUMatrixDynamic<T>& input,
 		const GPUMatrixDynamic<COMPUTE_T>& output,
@@ -276,7 +276,7 @@ public:
 	}
 
 	virtual void backward_backward_input_impl(
-		cudaStream_t stream,
+		hipStream_t stream,
 		const Context& ctx,
 		const GPUMatrixDynamic<T>& input,
 		const GPUMatrixDynamic<T>& dL_ddLdinput,
@@ -287,7 +287,7 @@ public:
 		GradientMode param_gradients_mode = GradientMode::Overwrite
 	) { throw std::runtime_error(std::string("DifferentiableObject::backward_backward_input_impl: not implemented error")); }
 	void backward_backward_input(
-		cudaStream_t stream,
+		hipStream_t stream,
 		const Context& ctx,
 		const GPUMatrixDynamic<T>& input,
 		const GPUMatrixDynamic<T>& dL_ddLdinput,
@@ -340,7 +340,7 @@ public:
 	}
 
 	void input_gradient(
-		cudaStream_t stream,
+		hipStream_t stream,
 		uint32_t dim,
 		const GPUMatrix<T>& input,
 		GPUMatrix<T>& d_dinput,

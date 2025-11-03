@@ -73,16 +73,16 @@ public:
 		}
 	}
 
-	void step(cudaStream_t stream, float loss_scale, float* weights_full_precision, T* weights, const T* gradients) override {
+	void step(hipStream_t stream, float loss_scale, float* weights_full_precision, T* weights, const T* gradients) override {
 		for (size_t i = 0; i < m_nested.size(); ++i) {
 			uint32_t offset = m_offsets[i];
 			m_nested[i]->step(stream, loss_scale, weights_full_precision + offset, weights + offset, gradients + offset);
 			if (m_need_custom_weights) {
-				CUDA_CHECK_THROW(cudaMemcpyAsync(
+				CUDA_CHECK_THROW(hipMemcpyAsync(
 					m_custom_weights.data() + offset,
 					m_nested[i]->custom_weights() == nullptr ? weights + offset : m_nested[i]->custom_weights(),
 					m_nested[i]->n_weights() * sizeof(T),
-					cudaMemcpyDeviceToDevice,
+					hipMemcpyDeviceToDevice,
 					stream
 				));
 			}

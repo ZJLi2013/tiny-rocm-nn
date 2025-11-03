@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 /*
  * Copyright (c) 2020-2023, NVIDIA CORPORATION.  All rights reserved.
  *
@@ -116,7 +117,7 @@ public:
 	}
 
 	std::unique_ptr<Context> forward_impl(
-		cudaStream_t stream,
+		hipStream_t stream,
 		const GPUMatrixDynamic<float>& input,
 		GPUMatrixDynamic<T>* output = nullptr,
 		bool use_inference_params = false,
@@ -146,7 +147,7 @@ public:
 	}
 
 	void backward_impl(
-		cudaStream_t stream,
+		hipStream_t stream,
 		const Context& ctx,
 		const GPUMatrixDynamic<float>& input,
 		const GPUMatrixDynamic<T>& output,

@@ -34,7 +34,7 @@
 #include <tiny-cuda-nn/gpu_matrix.h>
 #include <tiny-cuda-nn/common_device.h>
 
-#include <cublas_v2.h>
+#include <hipblas.h>
 
 #include <type_traits>
 
@@ -42,17 +42,17 @@ namespace tcnn {
 
 #define CUBLAS_CHECK_THROW(x)                                                                                        \
 	do {                                                                                                                   \
-		cublasStatus_t _result = x;                                                                                    \
-		if (_result != CUBLAS_STATUS_SUCCESS)                                                                            \
+		hipblasStatus_t _result = x;                                                                                    \
+		if (_result != HIPBLAS_STATUS_SUCCESS)                                                                            \
 			throw std::runtime_error(std::string(FILE_LINE " " #x " failed with error ") + std::to_string(_result)); \
 	} while(0)
 
 
-inline cublasHandle_t& cublas_handle() {
-	static cublasHandle_t handle;
+inline hipblasHandle_t& cublas_handle() {
+	static hipblasHandle_t handle;
 	static bool initialized = false;
 	if (!initialized) {
-		CUBLAS_CHECK_THROW(cublasCreate(&handle));
+		CUBLAS_CHECK_THROW(hipblasCreate(&handle));
 		initialized = true;
 	}
 	return handle;
@@ -60,7 +60,7 @@ inline cublasHandle_t& cublas_handle() {
 
 template <typename T>
 void cublas_gemm(
-	cudaStream_t stream,
+	hipStream_t stream,
 	const GPUMatrix<T, RM>& A,
 	const GPUMatrix<T, RM>& B,
 	GPUMatrix<T, RM>& C,
@@ -79,17 +79,17 @@ void cublas_gemm(
 		throw std::runtime_error{fmt::format("Matrix C has incorrect size {}x{} != {}x{}", C.m(), C.n(), m, n)};
 	}
 
-	cublasSetStream(cublas_handle(), stream);
+	hipblasSetStream(cublas_handle(), stream);
 
-	cudaDataType_t cuda_data_type = std::is_same<T, float>::value ? CUDA_R_32F : CUDA_R_16F;
-	cublasComputeType_t compute_type = CUBLAS_COMPUTE_32F;  // Use full FP32 for better numerical stability
+	hipDataType cuda_data_type = std::is_same<T, float>::value ? HIP_R_32F : HIP_R_16F;
+	hipblasComputeType_t compute_type = HIPBLAS_COMPUTE_32F;  // Use full FP32 for better numerical stability
 	
 	// Since all matrices are row-major, we can use the identity (A*B)^T = B^T * A^T
 	// and compute C_cm = B_cm * A_cm, which is equivalent to C_rm = A_rm * B_rm
 	// but with swapped arguments.
-	CUBLAS_CHECK_THROW(cublasGemmEx(
+	CUBLAS_CHECK_THROW(hipblasGemmEx_v2(
 		cublas_handle(),
-		CUBLAS_OP_N, CUBLAS_OP_N,
+		HIPBLAS_OP_N, HIPBLAS_OP_N,
 		n, m, k,
 		&alpha,
 		B.data(), cuda_data_type, B.stride(),
@@ -103,7 +103,7 @@ void cublas_gemm(
 
 template <typename T>
 void cublas_gemm(
-	cudaStream_t stream,
+	hipStream_t stream,
 	const GPUMatrix<T, CM>& A,
 	const GPUMatrix<T, CM>& B,
 	GPUMatrix<T, CM>& C,
@@ -122,14 +122,14 @@ void cublas_gemm(
 		throw std::runtime_error{fmt::format("Matrix C has incorrect size {}x{} != {}x{}", C.m(), C.n(), m, n)};
 	}
 
-	cublasSetStream(cublas_handle(), stream);
+	hipblasSetStream(cublas_handle(), stream);
 
-	cudaDataType_t cuda_data_type = std::is_same<T, float>::value ? CUDA_R_32F : CUDA_R_16F;
-	cublasComputeType_t compute_type = CUBLAS_COMPUTE_32F;  // Use full FP32 for better numerical stability
+	hipDataType cuda_data_type = std::is_same<T, float>::value ? HIP_R_32F : HIP_R_16F;
+	hipblasComputeType_t compute_type = HIPBLAS_COMPUTE_32F;  // Use full FP32 for better numerical stability
 
-	CUBLAS_CHECK_THROW(cublasGemmEx(
+	CUBLAS_CHECK_THROW(hipblasGemmEx_v2(
 		cublas_handle(),
-		CUBLAS_OP_N, CUBLAS_OP_N,
+		HIPBLAS_OP_N, HIPBLAS_OP_N,
 		m, n, k,
 		&alpha,
 		A.data(), cuda_data_type, A.stride(),
@@ -144,7 +144,7 @@ void cublas_gemm(
 // Fallback for mixed layouts (less efficient due to potential transposes)
 template <typename T, MatrixLayout LA, MatrixLayout LB, MatrixLayout LC>
 void cublas_gemm(
-	cudaStream_t stream,
+	hipStream_t stream,
 	const GPUMatrix<T, LA>& A,
 	const GPUMatrix<T, LB>& B,
 	GPUMatrix<T, LC>& C,
@@ -163,12 +163,12 @@ void cublas_gemm(
 		throw std::runtime_error{fmt::format("Matrix C has incorrect size {}x{} != {}x{}", C.m(), C.n(), m, n)};
 	}
 
-	cublasSetStream(cublas_handle(), stream);
+	hipblasSetStream(cublas_handle(), stream);
 
-	cudaDataType_t cuda_data_type = std::is_same<T, float>::value ? CUDA_R_32F : CUDA_R_16F;
-	cublasComputeType_t compute_type = CUBLAS_COMPUTE_32F;  // Use full FP32 for better numerical stability
+	hipDataType cuda_data_type = std::is_same<T, float>::value ? HIP_R_32F : HIP_R_16F;
+	hipblasComputeType_t compute_type = HIPBLAS_COMPUTE_32F;  // Use full FP32 for better numerical stability
 	
-	// For FP16 data with CUBLAS_COMPUTE_32F, alpha/beta should be float
+	// For FP16 data with HIPBLAS_COMPUTE_32F, alpha/beta should be float
 	// This provides full FP32 precision for accumulation
 
 	// For mixed layouts, we need to carefully handle the transpose operations
@@ -184,13 +184,13 @@ void cublas_gemm(
 		// 
 		// Key: RM matrices are already "transposed" when viewed as CM
 		// - RM (m×n, stride=n) viewed as CM is (n×m, stride=n)
-		// - So we use CUBLAS_OP_N (no additional transpose needed)
-		// - CM matrices need CUBLAS_OP_T to transpose them
-		cublasOperation_t op_a = LA == RM ? CUBLAS_OP_N : CUBLAS_OP_T;
-		cublasOperation_t op_b = LB == RM ? CUBLAS_OP_N : CUBLAS_OP_T;
+		// - So we use HIPBLAS_OP_N (no additional transpose needed)
+		// - CM matrices need HIPBLAS_OP_T to transpose them
+		hipblasOperation_t op_a = LA == RM ? HIPBLAS_OP_N : HIPBLAS_OP_T;
+		hipblasOperation_t op_b = LB == RM ? HIPBLAS_OP_N : HIPBLAS_OP_T;
 		
 		// Swap the operations to match the swapped matrices
-		CUBLAS_CHECK_THROW(cublasGemmEx(
+		CUBLAS_CHECK_THROW(hipblasGemmEx_v2(
 			cublas_handle(),
 			op_b, op_a,
 			n, m, k,
@@ -204,10 +204,10 @@ void cublas_gemm(
 		));
 	} else {
 		// Output is CM: use standard approach
-		cublasOperation_t op_a = LA == RM ? CUBLAS_OP_T : CUBLAS_OP_N;
-		cublasOperation_t op_b = LB == RM ? CUBLAS_OP_T : CUBLAS_OP_N;
+		hipblasOperation_t op_a = LA == RM ? HIPBLAS_OP_T : HIPBLAS_OP_N;
+		hipblasOperation_t op_b = LB == RM ? HIPBLAS_OP_T : HIPBLAS_OP_N;
 		
-		CUBLAS_CHECK_THROW(cublasGemmEx(
+		CUBLAS_CHECK_THROW(hipblasGemmEx_v2(
 			cublas_handle(),
 			op_a, op_b,
 			m, n, k,
@@ -225,7 +225,7 @@ void cublas_gemm(
 
 // Base version: C and D must have the same layout (non-const C)
 template <typename T, MatrixLayout LA, MatrixLayout LB, MatrixLayout LC>
-void fc_multiply_split_k(cudaStream_t stream, const GPUMatrix<T, LA>& A, const GPUMatrix<T, LB>& B, GPUMatrix<T, LC>& C, const GPUMatrix<T, LC>& D, int split_k_slices = 1, float beta = 0.0f) {
+void fc_multiply_split_k(hipStream_t stream, const GPUMatrix<T, LA>& A, const GPUMatrix<T, LB>& B, GPUMatrix<T, LC>& C, const GPUMatrix<T, LC>& D, int split_k_slices = 1, float beta = 0.0f) {
 	if (C.data() != D.data()) {
 		throw std::runtime_error("fc_multiply_split_k with cuBLAS requires C and D to be the same matrix.");
 	}
@@ -254,7 +254,7 @@ void fc_multiply_split_k(cudaStream_t stream, const GPUMatrix<T, LA>& A, const G
 // Overload for const C and const D with same layout
 // This handles calls from const GPUMatrixDynamic methods like .cm() and .rm()
 template <typename T, MatrixLayout LA, MatrixLayout LB, MatrixLayout LC>
-void fc_multiply_split_k(cudaStream_t stream, const GPUMatrix<T, LA>& A, const GPUMatrix<T, LB>& B, const GPUMatrix<T, LC>& C, const GPUMatrix<T, LC>& D, int split_k_slices = 1, float beta = 0.0f) {
+void fc_multiply_split_k(hipStream_t stream, const GPUMatrix<T, LA>& A, const GPUMatrix<T, LB>& B, const GPUMatrix<T, LC>& C, const GPUMatrix<T, LC>& D, int split_k_slices = 1, float beta = 0.0f) {
 	if (C.data() != D.data()) {
 		throw std::runtime_error("fc_multiply_split_k with cuBLAS requires C and D to be the same matrix.");
 	}
@@ -285,7 +285,7 @@ void fc_multiply_split_k(cudaStream_t stream, const GPUMatrix<T, LA>& A, const G
 
 // Overloads for GPUMatrixDynamic
 template <typename T, MatrixLayout LA, MatrixLayout LB, typename TC, typename TD>
-void fc_multiply_split_k(cudaStream_t stream, const GPUMatrix<T, LA>& A, const GPUMatrix<T, LB>& B, GPUMatrixDynamic<TC>& C, const GPUMatrixDynamic<TD>& D, int split_k_slices = 1, float beta = 0.0f) {
+void fc_multiply_split_k(hipStream_t stream, const GPUMatrix<T, LA>& A, const GPUMatrix<T, LB>& B, GPUMatrixDynamic<TC>& C, const GPUMatrixDynamic<TD>& D, int split_k_slices = 1, float beta = 0.0f) {
 	if (C.layout() != D.layout()) {
 		throw std::runtime_error{"fc_multiply_split_k: Layout of GPUMatrixDynamic C and D must be equal"};
 	}
@@ -298,7 +298,7 @@ void fc_multiply_split_k(cudaStream_t stream, const GPUMatrix<T, LA>& A, const G
 }
 
 template <typename T, MatrixLayout LA, typename TB, typename TC, typename TD>
-void fc_multiply_split_k(cudaStream_t stream, const GPUMatrix<T, LA>& A, const GPUMatrixDynamic<TB>& B, GPUMatrixDynamic<TC>& C, const GPUMatrixDynamic<TD>& D, int split_k_slices = 1, float beta = 0.0f) {
+void fc_multiply_split_k(hipStream_t stream, const GPUMatrix<T, LA>& A, const GPUMatrixDynamic<TB>& B, GPUMatrixDynamic<TC>& C, const GPUMatrixDynamic<TD>& D, int split_k_slices = 1, float beta = 0.0f) {
 	if (B.layout() == CM) {
 		fc_multiply_split_k(stream, A, B.cm(), C, D, split_k_slices, beta);
 	} else {
@@ -307,7 +307,7 @@ void fc_multiply_split_k(cudaStream_t stream, const GPUMatrix<T, LA>& A, const G
 }
 
 template <typename TA, typename TB, typename TC, typename TD>
-void fc_multiply_split_k(cudaStream_t stream, const GPUMatrixDynamic<TA>& A, const GPUMatrixDynamic<TB>& B, GPUMatrixDynamic<TC>& C, const GPUMatrixDynamic<TD>& D, int split_k_slices = 1, float beta = 0.0f) {
+void fc_multiply_split_k(hipStream_t stream, const GPUMatrixDynamic<TA>& A, const GPUMatrixDynamic<TB>& B, GPUMatrixDynamic<TC>& C, const GPUMatrixDynamic<TD>& D, int split_k_slices = 1, float beta = 0.0f) {
 	if (A.layout() == CM) {
 		fc_multiply_split_k(stream, A.cm(), B, C, D, split_k_slices, beta);
 	} else {
@@ -316,13 +316,13 @@ void fc_multiply_split_k(cudaStream_t stream, const GPUMatrixDynamic<TA>& A, con
 }
 
 template <typename TA, typename TB, typename TD>
-void fc_multiply_split_k(cudaStream_t stream, const GPUMatrixDynamic<TA>& A, const GPUMatrixDynamic<TB>& B, GPUMatrixDynamic<TD>& D, int split_k_slices, float beta) {
+void fc_multiply_split_k(hipStream_t stream, const GPUMatrixDynamic<TA>& A, const GPUMatrixDynamic<TB>& B, GPUMatrixDynamic<TD>& D, int split_k_slices, float beta) {
 	fc_multiply_split_k(stream, A, B, D, D, split_k_slices, beta);
 }
 
 // Additional overloads for mixed GPUMatrix/GPUMatrixDynamic with 4 matrix parameters
 template <typename TA, typename T, MatrixLayout LB, MatrixLayout LC>
-void fc_multiply_split_k(cudaStream_t stream, const GPUMatrixDynamic<TA>& A, const GPUMatrix<T, LB>& B, GPUMatrix<T, LC>& C, const GPUMatrix<T, LC>& D, int split_k_slices = 1, float beta = 0.0f) {
+void fc_multiply_split_k(hipStream_t stream, const GPUMatrixDynamic<TA>& A, const GPUMatrix<T, LB>& B, GPUMatrix<T, LC>& C, const GPUMatrix<T, LC>& D, int split_k_slices = 1, float beta = 0.0f) {
 	if (A.layout() == CM) {
 		fc_multiply_split_k(stream, A.cm(), B, C, D, split_k_slices, beta);
 	} else {
@@ -331,7 +331,7 @@ void fc_multiply_split_k(cudaStream_t stream, const GPUMatrixDynamic<TA>& A, con
 }
 
 template <typename T, MatrixLayout LA, typename TB, MatrixLayout LC>
-void fc_multiply_split_k(cudaStream_t stream, const GPUMatrix<T, LA>& A, const GPUMatrixDynamic<TB>& B, GPUMatrix<T, LC>& C, const GPUMatrix<T, LC>& D, int split_k_slices = 1, float beta = 0.0f) {
+void fc_multiply_split_k(hipStream_t stream, const GPUMatrix<T, LA>& A, const GPUMatrixDynamic<TB>& B, GPUMatrix<T, LC>& C, const GPUMatrix<T, LC>& D, int split_k_slices = 1, float beta = 0.0f) {
 	if (B.layout() == CM) {
 		fc_multiply_split_k(stream, A, B.cm(), C, D, split_k_slices, beta);
 	} else {
@@ -342,7 +342,7 @@ void fc_multiply_split_k(cudaStream_t stream, const GPUMatrix<T, LA>& A, const G
 // Base version: C and D can have different layouts
 template <typename T, MatrixLayout LA, MatrixLayout LB, MatrixLayout LC, MatrixLayout LD>
 void fc_multiply(
-	cudaStream_t stream,
+	hipStream_t stream,
 	const GPUMatrix<T, LA>& A,
 	const GPUMatrix<T, LB>& B,
 	const GPUMatrix<T, LC>& C,
@@ -361,7 +361,7 @@ void fc_multiply(
 	// Handle C != D case
 	if (C.data() != D.data()) {
 		if (sum_source) {
-			CUDA_CHECK_THROW(cudaMemcpyAsync(D.data(), C.data(), C.n_bytes(), cudaMemcpyDeviceToDevice, stream));
+			CUDA_CHECK_THROW(hipMemcpyAsync(D.data(), C.data(), C.n_bytes(), hipMemcpyDeviceToDevice, stream));
 		}
 	}
 
@@ -383,7 +383,7 @@ void fc_multiply(
 // Overload for when C and D are the same matrix (3-argument version)
 template <typename T, MatrixLayout LA, MatrixLayout LB, MatrixLayout LC>
 void fc_multiply(
-	cudaStream_t stream,
+	hipStream_t stream,
 	const GPUMatrix<T, LA>& A,
 	const GPUMatrix<T, LB>& B,
 	GPUMatrix<T, LC>& D,
@@ -396,7 +396,7 @@ void fc_multiply(
 // This handles calls from const GPUMatrixDynamic methods like .cm() and .rm()
 template <typename T, MatrixLayout LA, MatrixLayout LB, MatrixLayout LCD>
 void fc_multiply(
-	cudaStream_t stream,
+	hipStream_t stream,
 	const GPUMatrix<T, LA>& A,
 	const GPUMatrix<T, LB>& B,
 	const GPUMatrix<T, LCD>& C,
@@ -419,7 +419,7 @@ void fc_multiply(
 	// Handle C != D case
 	if (C.data() != D.data()) {
 		if (sum_source) {
-			CUDA_CHECK_THROW(cudaMemcpyAsync(D_mutable.data(), C.data(), C.n_bytes(), cudaMemcpyDeviceToDevice, stream));
+			CUDA_CHECK_THROW(hipMemcpyAsync(D_mutable.data(), C.data(), C.n_bytes(), hipMemcpyDeviceToDevice, stream));
 		}
 	}
 
@@ -442,7 +442,7 @@ void fc_multiply(
 // This handles calls where C and D are non-const and have the same layout
 template <typename T, MatrixLayout LA, MatrixLayout LB, MatrixLayout LCD>
 void fc_multiply(
-	cudaStream_t stream,
+	hipStream_t stream,
 	const GPUMatrix<T, LA>& A,
 	const GPUMatrix<T, LB>& B,
 	GPUMatrix<T, LCD>& C,
@@ -461,7 +461,7 @@ void fc_multiply(
 	// Handle C != D case
 	if (C.data() != D.data()) {
 		if (sum_source) {
-			CUDA_CHECK_THROW(cudaMemcpyAsync(D.data(), C.data(), C.n_bytes(), cudaMemcpyDeviceToDevice, stream));
+			CUDA_CHECK_THROW(hipMemcpyAsync(D.data(), C.data(), C.n_bytes(), hipMemcpyDeviceToDevice, stream));
 		}
 	}
 
@@ -483,7 +483,7 @@ void fc_multiply(
 // Overloads for GPUMatrixDynamic
 template <typename T, MatrixLayout LA, MatrixLayout LB, typename TC, typename TD>
 void fc_multiply(
-	cudaStream_t stream,
+	hipStream_t stream,
 	const GPUMatrix<T, LA>& A,
 	const GPUMatrix<T, LB>& B,
 	const GPUMatrixDynamic<TC>& C,
@@ -505,7 +505,7 @@ void fc_multiply(
 
 template <typename T, MatrixLayout LA, typename TB, typename TC, typename TD>
 void fc_multiply(
-	cudaStream_t stream,
+	hipStream_t stream,
 	const GPUMatrix<T, LA>& A,
 	const GPUMatrixDynamic<TB>& B,
 	GPUMatrixDynamic<TC>& C,
@@ -523,7 +523,7 @@ void fc_multiply(
 
 template <typename T, MatrixLayout LA, typename TB, typename TD>
 void fc_multiply(
-	cudaStream_t stream,
+	hipStream_t stream,
 	const GPUMatrix<T, LA>& A,
 	const GPUMatrixDynamic<TB>& B,
 	GPUMatrixDynamic<TD>& D,

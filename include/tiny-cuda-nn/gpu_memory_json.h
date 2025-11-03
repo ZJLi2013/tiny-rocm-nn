@@ -36,12 +36,12 @@ namespace tcnn {
 inline nlohmann::json::binary_t gpu_memory_to_json_binary(const void* gpu_data, size_t n_bytes) {
 	nlohmann::json::binary_t data_cpu;
 	data_cpu.resize(n_bytes);
-	CUDA_CHECK_THROW(cudaMemcpy(data_cpu.data(), gpu_data, n_bytes, cudaMemcpyDeviceToHost));
+	CUDA_CHECK_THROW(hipMemcpy(data_cpu.data(), gpu_data, n_bytes, hipMemcpyDeviceToHost));
 	return data_cpu;
 }
 
 inline void json_binary_to_gpu_memory(const nlohmann::json::binary_t& cpu_data, void* gpu_data, size_t n_bytes) {
-	CUDA_CHECK_THROW(cudaMemcpy(gpu_data, cpu_data.data(), n_bytes, cudaMemcpyHostToDevice));
+	CUDA_CHECK_THROW(hipMemcpy(gpu_data, cpu_data.data(), n_bytes, hipMemcpyHostToDevice));
 }
 
 template <typename T>

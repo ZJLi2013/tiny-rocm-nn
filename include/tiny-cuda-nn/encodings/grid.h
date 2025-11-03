@@ -1,3 +1,4 @@
+#include "hip/hip_runtime.h"
 /*
  * Copyright (c) 2020-2023, NVIDIA CORPORATION.  All rights reserved.
  *
@@ -730,7 +731,7 @@ public:
 	}
 
 	std::unique_ptr<Context> forward_impl(
-		cudaStream_t stream,
+		hipStream_t stream,
 		const GPUMatrixDynamic<float>& input,
 		GPUMatrixDynamic<T>* output = nullptr,
 		bool use_inference_params = false,
@@ -807,7 +808,7 @@ public:
 	}
 
 	void backward_impl(
-		cudaStream_t stream,
+		hipStream_t stream,
 		const Context& ctx,
 		const GPUMatrixDynamic<float>& input,
 		const GPUMatrixDynamic<T>& output,
@@ -855,7 +856,7 @@ public:
 			}
 
 			if (param_gradients_mode == GradientMode::Overwrite) {
-				CUDA_CHECK_THROW(cudaMemsetAsync(grid_gradient, 0, n_params() * sizeof(grad_t), stream));
+				CUDA_CHECK_THROW(hipMemsetAsync(grid_gradient, 0, n_params() * sizeof(grad_t), stream));
 			}
 
 			static constexpr uint32_t N_THREADS_HASHGRID = 256;
@@ -900,7 +901,7 @@ public:
 	}
 
 	void backward_backward_input_impl(
-		cudaStream_t stream,
+		hipStream_t stream,
 		const Context& ctx,
 		const GPUMatrixDynamic<float>& input,
 		const GPUMatrixDynamic<float>& dL_ddLdinput,
@@ -949,7 +950,7 @@ public:
 			}
 
 			if (param_gradients_mode == GradientMode::Overwrite) {
-				CUDA_CHECK_THROW(cudaMemsetAsync(grid_gradient, 0, n_params() * sizeof(grad_t), stream));
+				CUDA_CHECK_THROW(hipMemsetAsync(grid_gradient, 0, n_params() * sizeof(grad_t), stream));
 			}
 
 			static constexpr uint32_t N_THREADS_HASHGRID = 256;
