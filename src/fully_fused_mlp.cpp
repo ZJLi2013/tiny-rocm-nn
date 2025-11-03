@@ -35,7 +35,7 @@
 #include <tiny-cuda-nn/cublas_matmul.h>
 #include <tiny-cuda-nn/multi_stream.h>
 
-#include <mma.h>
+#include <rocwmma/rocwmma.hpp>
 
 namespace tcnn {
 
@@ -67,7 +67,7 @@ __device__ void threadblock_layer(Activation activation, __half* __restrict__ ac
 	//     - 在反向传播时 (`BACKWARD=true`)，权重会以转置的方式加载，这是通过改变内存访问模式实现的。
 	// 2.  **循环计算**: 通过一个 `N_ITERS` 的循环，处理一个线程块所负责的所有数据。在每次迭代中：
 	//     a. **加载激活值**: 从共享内存 `act_shmem` 中加载当前层的输入激活值（或梯度）到一个 `wmma::fragment` (WMMA硬件单元的操作对象) 中。
-	//     b. **矩阵乘法**: 使用 `wmma::mma_sync` 指令，执行一次 16x16x16 的矩阵乘法累加操作。这个操作利用了Tensor Core，是性能的关键。
+	//     b. **矩阵乘法**: 使用 `mma_sync` 指令，执行一次 16x16x16 的矩阵乘法累加操作。这个操作利用了Tensor Core，是性能的关键。
 	//        它将从共享内存加载的激活值与寄存器中的权重相乘，结果累加到 `result_frag` 中。
 	//     c. **激活函数**: 对矩阵乘法的结果应用指定的激活函数（或其导数，在反向传播时）。
 	// 3.  **写回结果**: 将计算完成的结果（下一层的激活值或梯度）写回到共享内存 `act_shmem` 的相应位置，供下一层计算使用。
@@ -84,16 +84,20 @@ __device__ void threadblock_layer(Activation activation, __half* __restrict__ ac
 	constexpr uint32_t SKEW = WIDTH % 16 == 0 ? 8 : 0;
 	constexpr uint32_t N_BLOCKS = WIDTH / 16;
 
-	using namespace nvcuda;
+	using namespace rocwmma;
 
 	// If we're performing the backward pass, weights must be loaded in transposed form, which
 	// is achieved by interpreting the memory in row_major instead of col_major order.
-	using weights_layout_t = std::conditional_t<BACKWARD, wmma::row_major, wmma::col_major>;
+	using weights_layout_t = typename std::conditional<BACKWARD, row_major, col_major>::type;
 
 	// Fragments
-	wmma::fragment<wmma::matrix_a, 16, 16, 16, __half, wmma::row_major> act_frag;
-	wmma::fragment<wmma::matrix_b, 16, 16, 16, __half, weights_layout_t> weights_frag[N_BLOCKS];
-	wmma::fragment<wmma::accumulator, 16, 16, 16, OUT_T> result_frag[N_ITERS];
+	using MatrixA = fragment<matrix_a, 16, 16, 16, __half, row_major>;
+	using MatrixB = fragment<matrix_b, 16, 16, 16, __half, weights_layout_t>;
+	using Accumulator = fragment<accumulator, 16, 16, 16, OUT_T>;
+
+	MatrixA act_frag;
+	MatrixB weights_frag[N_BLOCKS];
+	Accumulator result_frag[N_ITERS];
 
 	// Indices
 	const uint32_t li = threadIdx.x; // index in warp ("lane index")
@@ -112,27 +116,27 @@ __device__ void threadblock_layer(Activation activation, __half* __restrict__ ac
 		if (BACKWARD) {
 			// If we're performing the backward pass, additional index swizzling is needed to
 			// load the weights in transposed form.
-			wmma::load_matrix_sync(weights_frag[i], weights_this_layer + 16 * i * WIDTH + weights_col, WIDTH);
+			load_matrix_sync(weights_frag[i], weights_this_layer + 16 * i * WIDTH + weights_col, WIDTH);
 		} else {
-			wmma::load_matrix_sync(weights_frag[i], weights_this_layer + 16 * i + weights_col * WIDTH, WIDTH);
+			load_matrix_sync(weights_frag[i], weights_this_layer + 16 * i + weights_col * WIDTH, WIDTH);
 		}
 	}
 
 	TCNN_PRAGMA_UNROLL
 	for (int l = 0; l < N_ITERS; ++l) {
-		wmma::fill_fragment(result_frag[l], 0.0f);
+		fill_fragment(result_frag[l], 0.0f);
 
 		TCNN_PRAGMA_UNROLL
 		for (uint32_t i = 0; i < N_BLOCKS; ++i) {
 			// Load a chunk of intermediate activations from shared memory and multiply with chunk of weights
-			wmma::load_matrix_sync(act_frag, act_shmem + 16 * i + (16 * l) * (WIDTH + SKEW), WIDTH + SKEW);
-			wmma::mma_sync(result_frag[l], act_frag, weights_frag[i], result_frag[l]);
+			load_matrix_sync(act_frag, act_shmem + 16 * i + (16 * l) * (WIDTH + SKEW), WIDTH + SKEW);
+			mma_sync(result_frag[l], act_frag, weights_frag[i], result_frag[l]);
 		}
 
 		// Activation
 		if (BACKWARD) {
 			// Load the temporary forward matrix for the relu transfer
-			wmma::load_matrix_sync(act_frag, activation_aux + weights_col + l * 16 * WIDTH, WIDTH);
+			load_matrix_sync(act_frag, activation_aux + weights_col + l * 16 * WIDTH, WIDTH);
 			warp_activation_backward<__half>(activation, result_frag[l], act_frag, result_frag[l]);
 		} else {
 			warp_activation<__half>(activation, result_frag[l], result_frag[l]);
@@ -143,7 +147,7 @@ __device__ void threadblock_layer(Activation activation, __half* __restrict__ ac
 
 	TCNN_PRAGMA_UNROLL
 	for (int l = 0; l < N_ITERS; ++l) {
-		wmma::store_matrix_sync(act_shmem + weights_col + l * 16 * (WIDTH + SKEW), result_frag[l], WIDTH + SKEW, wmma::mem_row_major);
+		store_matrix_sync(act_shmem + weights_col + l * 16 * (WIDTH + SKEW), result_frag[l], WIDTH + SKEW, mem_row_major);
 	}
 
 	if (out_intermediate_threadblock_this_layer != nullptr) {
@@ -225,37 +229,37 @@ __global__ void kernel_mlp_fused_backward(
 
 	// Backprop through last layer
 	if (out_width <= 16) {
-		using namespace nvcuda;
+		using namespace rocwmma;
 
 		// Fragments in registers
-		wmma::fragment<wmma::matrix_a, 16, 16, 16, __half, OUTPUT_LAYOUT> act_frag;
-		wmma::fragment<wmma::matrix_b, 16, 16, 16, __half, wmma::row_major> weights_frag;
-		wmma::fragment<wmma::accumulator, 16, 16, 16, __half> result_frag[N_ITERS];
+		fragment<matrix_a, 16, 16, 16, __half, OUTPUT_LAYOUT> act_frag;
+		fragment<matrix_b, 16, 16, 16, __half, row_major> weights_frag;
+		fragment<accumulator, 16, 16, 16, __half> result_frag[N_ITERS];
 
 		// Load the relevant chunk of the last layer's weight matrix from global memory into registers
 		const uint32_t weights_col = 16 * wi;
 
-		wmma::load_matrix_sync(weights_frag, weights + weights_stride * n_hidden_matmuls + weights_col, WIDTH);
+		load_matrix_sync(weights_frag, weights + weights_stride * n_hidden_matmuls + weights_col, WIDTH);
 
 		TCNN_PRAGMA_UNROLL
 		for (int l = 0; l < N_ITERS; ++l) {
-			wmma::fill_fragment(result_frag[l], 0.0f);
+			fill_fragment(result_frag[l], 0.0f);
 
 			// Load a chunk of output gradients from shared memory and multiply with previously loaded weights
-			if (std::is_same<OUTPUT_LAYOUT, wmma::row_major>::value) {
-				wmma::load_matrix_sync(act_frag, dL_doutput + (elem_idx + 16 * l) * output_stride, output_stride);
+			if (std::is_same<OUTPUT_LAYOUT, row_major>::value) {
+				load_matrix_sync(act_frag, dL_doutput + (elem_idx + 16 * l) * output_stride, output_stride);
 			} else {
-				wmma::load_matrix_sync(act_frag, dL_doutput + (elem_idx + 16 * l), output_stride);
+				load_matrix_sync(act_frag, dL_doutput + (elem_idx + 16 * l), output_stride);
 			}
 
 			// NOTE: activation transfer of the _output_ activation is expected to be done _prior_ to calling this kernel
 			//       in a separate pass, because the tranfered activation gradient is also needed to compute the weight
 			//       gradient of the last weight matrix (see backward()).
-			wmma::mma_sync(result_frag[l], act_frag, weights_frag, result_frag[l]);
+			mma_sync(result_frag[l], act_frag, weights_frag, result_frag[l]);
 
 			// Load the temporary forward matrix for the relu transfer
-			wmma::fragment<wmma::matrix_a, 16, 16, 16, __half, wmma::row_major> forward_frag;
-			wmma::load_matrix_sync(forward_frag, forward + layer_stride * n_hidden_matmuls + weights_col + (elem_idx + l * 16) * WIDTH, WIDTH);
+			fragment<matrix_a, 16, 16, 16, __half, row_major> forward_frag;
+			load_matrix_sync(forward_frag, forward + layer_stride * n_hidden_matmuls + weights_col + (elem_idx + l * 16) * WIDTH, WIDTH);
 
 			warp_activation_backward<__half>(ACTIVATION, result_frag[l], forward_frag, result_frag[l]);
 		}
@@ -264,7 +268,7 @@ __global__ void kernel_mlp_fused_backward(
 
 		TCNN_PRAGMA_UNROLL
 		for (int l = 0; l < N_ITERS; ++l) {
-			wmma::store_matrix_sync(act_shmem + weights_col + (16 * l) * (WIDTH + SKEW), result_frag[l], WIDTH + SKEW, wmma::mem_row_major);
+			store_matrix_sync(act_shmem + weights_col + (16 * l) * (WIDTH + SKEW), result_frag[l], WIDTH + SKEW, mem_row_major);
 		}
 
 		__syncthreads();
@@ -339,11 +343,11 @@ std::enable_if_t<std::is_same<__half, T>::value> mlp_fused_backward(
 	
 	// The kernels operate with transposed layouts compared with the MLP code
 	if (dL_doutput.layout() == RM) {
-		check_shmem_error(hipFuncSetAttribute(reinterpret_cast<const void*>(kernel_mlp_fused_backward<WIDTH), N_ITERS, ACTIVATION, nvcuda::wmma::col_major>, hipFuncAttributeMaxDynamicSharedMemorySize, shmem_size));
-		kernel_mlp_fused_backward<WIDTH, N_ITERS, ACTIVATION, nvcuda::wmma::col_major><<<blocks, threads, shmem_size, stream>>>(dL_doutput.data(), weights.data(), temporaries.data(), forward.data(), dL_dinput ? dL_dinput->data() : nullptr, weights_first_layer.data(), dL_doutput.stride(), batch_size, out_width, n_hidden_matmuls);
+		check_shmem_error(hipFuncSetAttribute(reinterpret_cast<const void*>(kernel_mlp_fused_backward<WIDTH), N_ITERS, ACTIVATION, rocwmma::col_major>, hipFuncAttributeMaxDynamicSharedMemorySize, shmem_size));
+		kernel_mlp_fused_backward<WIDTH, N_ITERS, ACTIVATION, rocwmma::col_major><<<blocks, threads, shmem_size, stream>>>(dL_doutput.data(), weights.data(), temporaries.data(), forward.data(), dL_dinput ? dL_dinput->data() : nullptr, weights_first_layer.data(), dL_doutput.stride(), batch_size, out_width, n_hidden_matmuls);
 	} else {
-		check_shmem_error(hipFuncSetAttribute(reinterpret_cast<const void*>(kernel_mlp_fused_backward<WIDTH), N_ITERS, ACTIVATION, nvcuda::wmma::row_major>, hipFuncAttributeMaxDynamicSharedMemorySize, shmem_size));
-		kernel_mlp_fused_backward<WIDTH, N_ITERS, ACTIVATION, nvcuda::wmma::row_major><<<blocks, threads, shmem_size, stream>>>(dL_doutput.data(), weights.data(), temporaries.data(), forward.data(), dL_dinput ? dL_dinput->data() : nullptr, weights_first_layer.data(), dL_doutput.stride(), batch_size, out_width, n_hidden_matmuls);
+		check_shmem_error(hipFuncSetAttribute(reinterpret_cast<const void*>(kernel_mlp_fused_backward<WIDTH), N_ITERS, ACTIVATION, rocwmma::row_major>, hipFuncAttributeMaxDynamicSharedMemorySize, shmem_size));
+		kernel_mlp_fused_backward<WIDTH, N_ITERS, ACTIVATION, rocwmma::row_major><<<blocks, threads, shmem_size, stream>>>(dL_doutput.data(), weights.data(), temporaries.data(), forward.data(), dL_dinput ? dL_dinput->data() : nullptr, weights_first_layer.data(), dL_doutput.stride(), batch_size, out_width, n_hidden_matmuls);
 	}
 }
 
@@ -359,7 +363,7 @@ __device__ void threadblock_input_layer_forward_dynamic(Activation activation, _
 	// 2.  **分块处理输入**:
 	//     - 如果输入是行主序 (`row_major`)，会先将一小块输入数据从全局内存加载到共享内存 `act_shmem` 中。这利用了暂存（staging）来隐藏延迟。
 	//     - 如果输入是列主序 (`col_major`)，则直接从全局内存加载。
-	// 3.  **矩阵乘法**: 在一个循环中，使用 `wmma::mma_sync` 指令将输入块与从共享内存加载的权重块进行矩阵乘法。
+	// 3.  **矩阵乘法**: 在一个循环中，使用 `mma_sync` 指令将输入块与从共享内存加载的权重块进行矩阵乘法。
 	// 4.  **激活与写回**: 对结果应用激活函数，然后将最终的激活值写回到共享内存 `act_shmem` 中，准备给下一个（隐藏）层使用。
 	// 5.  **(可选)写回全局内存**: 与 `threadblock_layer` 类似，如果需要保存中间结果，则将其写回到全局内存。
 
@@ -374,12 +378,12 @@ __device__ void threadblock_input_layer_forward_dynamic(Activation activation, _
 	constexpr uint32_t INPUT_SKEW = 8;  // used to handle padding, ensure alignment in shmem 
 	constexpr uint32_t N_BLOCKS = WIDTH / 16;
 
-	using namespace nvcuda;
+	using namespace rocwmma;
 
 	// Fragments: small tiles of matrices 
-	wmma::fragment<wmma::matrix_a, 16, 16, 16, __half, INPUT_LAYOUT> act_frag;
-	wmma::fragment<wmma::matrix_b, 16, 16, 16, __half, wmma::col_major> weights_frag;
-	wmma::fragment<wmma::accumulator, 16, 16, 16, OUT_T> result_frag[N_ITERS];
+	fragment<matrix_a, 16, 16, 16, __half, INPUT_LAYOUT> act_frag;
+	fragment<matrix_b, 16, 16, 16, __half, col_major> weights_frag;
+	fragment<accumulator, 16, 16, 16, OUT_T> result_frag[N_ITERS];
 
 	// Indices
 	const uint32_t li = threadIdx.x; // index in warp ("lane index")
@@ -407,13 +411,13 @@ __device__ void threadblock_input_layer_forward_dynamic(Activation activation, _
 
 	const uint32_t n_tensor_ops = in_width / 16;
 
-	if (std::is_same<INPUT_LAYOUT, wmma::col_major>::value) {
+	if (std::is_same<INPUT_LAYOUT, col_major>::value) {
 		__syncthreads();
 	}
 
 	TCNN_PRAGMA_UNROLL
 	for (int l = 0; l < N_ITERS; ++l) {
-		if (std::is_same<INPUT_LAYOUT, wmma::row_major>::value) {
+		if (std::is_same<INPUT_LAYOUT, row_major>::value) {
 			// Load chunk of inputs into shmem.
 			// This is faster than loading it from gmem directly, even though it is only used once.
 			// (Possibly due to latency hiding through staging.)
@@ -432,35 +436,35 @@ __device__ void threadblock_input_layer_forward_dynamic(Activation activation, _
 		// 下面的代码块是利用NVIDIA GPU的Tensor Core进行高效矩阵乘法的核心。
 		// 它遵循一个标准的 "load-multiply-accumulate-store" 模式，但所有操作都在warp级别上，并由硬件加速。
 
-		// 1. `wmma::fill_fragment(result_frag[l], 0.0f);`
+		// 1. `fill_fragment(result_frag[l], 0.0f);`
 		//    初始化累加器片段 `result_frag`。每个warp都有自己的一组寄存器来存储这个片段，
 		//    这里我们将其所有元素设置为0，为接下来的乘加操作做准备。
-		wmma::fill_fragment(result_frag[l], 0.0f);
+		fill_fragment(result_frag[l], 0.0f);
 		TCNN_PRAGMA_UNROLL
 		// 2. `for (uint32_t i = 0; i < n_tensor_ops; ++i)`
 		//    这个循环将一个大的矩阵乘法拆分成一系列小的 16x16x16 的块乘法。
 		//    `n_tensor_ops` 代表需要多少个这样的块乘法来覆盖整个输入维度。
 		for (uint32_t i = 0; i < n_tensor_ops; ++i) {
-			// 3. `wmma::load_matrix_sync(...)`
+			// 3. `load_matrix_sync(...)`
 			//    这两条指令从共享内存或全局内存中加载一小块（16x16）的输入激活矩阵(A)和权重矩阵(B)
 			//    到专门的寄存器片段 `act_frag` 和 `weights_frag` 中。
 			//    `_sync` 后缀表示这是一个warp内的同步操作，确保所有线程都完成了加载。
 
-			// 4. `wmma::mma_sync(result_frag[l], act_frag, weights_frag, result_frag[l]);`
+			// 4. `mma_sync(result_frag[l], act_frag, weights_frag, result_frag[l]);`
 			//    这是执行矩阵乘法累加的核心指令： D = A * B + C。
 			//    它调用Tensor Core硬件来计算 `act_frag` 和 `weights_frag` 的乘积，
 			//    然后将结果累加到 `result_frag` 中。整个操作对warp中的所有线程是同步的。
 			// Load chunk of inputs and weights from shared memory and multiply them
-			if (std::is_same<INPUT_LAYOUT, wmma::row_major>::value) {
-				wmma::load_matrix_sync(act_frag, act_shmem + 16 * i, in_width + INPUT_SKEW);
+			if (std::is_same<INPUT_LAYOUT, row_major>::value) {
+				load_matrix_sync(act_frag, act_shmem + 16 * i, in_width + INPUT_SKEW);
 			} else {
-				wmma::load_matrix_sync(act_frag, input_threadblock + 16 * i * batch_size + 16 * l, batch_size);
+				load_matrix_sync(act_frag, input_threadblock + 16 * i * batch_size + 16 * l, batch_size);
 			}
-			wmma::load_matrix_sync(weights_frag, weights_shmem + 16 * i + weights_col * (in_width + INPUT_SKEW), in_width + INPUT_SKEW);
-			wmma::mma_sync(result_frag[l], act_frag, weights_frag, result_frag[l]);
+			load_matrix_sync(weights_frag, weights_shmem + 16 * i + weights_col * (in_width + INPUT_SKEW), in_width + INPUT_SKEW);
+			mma_sync(result_frag[l], act_frag, weights_frag, result_frag[l]);
 		}
 
-		if (std::is_same<INPUT_LAYOUT, wmma::row_major>::value) {
+		if (std::is_same<INPUT_LAYOUT, row_major>::value) {
 			__syncthreads();
 		}
 
@@ -478,13 +482,13 @@ __device__ void threadblock_input_layer_forward_dynamic(Activation activation, _
 		warp_activation<__half>(activation, result_frag[l], result_frag[l]);
 	}
 
-	if (std::is_same<INPUT_LAYOUT, wmma::col_major>::value) {
+	if (std::is_same<INPUT_LAYOUT, col_major>::value) {
 		__syncthreads();
 	}
 
 	TCNN_PRAGMA_UNROLL
 	for (int l = 0; l < N_ITERS; ++l) {
-		wmma::store_matrix_sync(act_shmem + weights_col + (16 * l) * (WIDTH + SKEW), result_frag[l], WIDTH + SKEW, wmma::mem_row_major);
+		store_matrix_sync(act_shmem + weights_col + (16 * l) * (WIDTH + SKEW), result_frag[l], WIDTH + SKEW, mem_row_major);
 	}
 
 	if (out_intermediate_threadblock_this_layer != nullptr) {
@@ -498,7 +502,7 @@ __device__ void threadblock_input_layer_forward_dynamic(Activation activation, _
 }
 
 template <int WIDTH, int N_ITERS, typename OUT_T>
-__device__ void threadblock_last_layer_forward(Activation activation, __half* __restrict__ act_shmem, const __half* __restrict__ weights_this_layer, OUT_T* __restrict__ out, const uint32_t output_stride, const nvcuda::wmma::layout_t output_layout) {
+__device__ void threadblock_last_layer_forward(Activation activation, __half* __restrict__ act_shmem, const __half* __restrict__ weights_this_layer, OUT_T* __restrict__ out, const uint32_t output_stride, const rocwmma::layout_t output_layout) {
 	// --- 中文注释 ---
 	// `threadblock_last_layer_forward`: 这个设备函数专门用于处理网络的最后一层的前向传播，前提是输出维度 `<= 16`。
 	//
@@ -507,9 +511,9 @@ __device__ void threadblock_last_layer_forward(Activation activation, __half* __
 	// 2.  **加载权重到寄存器**: 从共享内存中将权重加载到每个warp的 `weights_frag` 寄存器片段中。
 	// 3.  **循环计算**: 循环遍历 `N_ITERS` 次，处理线程块负责的所有数据。
 	//     a. **加载激活值**: 从 `act_shmem` 加载倒数第二层的激活值。
-	//     b. **矩阵乘法**: 使用 `wmma::mma_sync` 将激活值与权重相乘。
+	//     b. **矩阵乘法**: 使用 `mma_sync` 将激活值与权重相乘。
 	//     c. **激活函数**: 应用最终的输出层激活函数。
-	// 4.  **写回最终输出**: 使用 `wmma::store_matrix_sync` 将计算结果直接写入全局内存的最终输出位置 `out`。
+	// 4.  **写回最终输出**: 使用 `store_matrix_sync` 将计算结果直接写入全局内存的最终输出位置 `out`。
 
 	// act_shmem contains the intermediate activations (shared memory) of the thread block's chunk of the batch
 	// weights_this_layer points to the weight matrix of the current layer
@@ -519,12 +523,12 @@ __device__ void threadblock_last_layer_forward(Activation activation, __half* __
 	constexpr uint32_t SKEW = WIDTH % 16 == 0 ? 8 : 0;
 	constexpr uint32_t N_BLOCKS = WIDTH / 16;
 
-	using namespace nvcuda;
+	using namespace rocwmma;
 
 	// Fragments
-	wmma::fragment<wmma::matrix_a, 16, 16, 16, __half, wmma::row_major> act_frag;
-	wmma::fragment<wmma::matrix_b, 16, 16, 16, __half, wmma::col_major> weights_frag[N_BLOCKS];
-	wmma::fragment<wmma::accumulator, 16, 16, 16, OUT_T> result_frag;
+	fragment<matrix_a, 16, 16, 16, __half, row_major> act_frag;
+	fragment<matrix_b, 16, 16, 16, __half, col_major> weights_frag[N_BLOCKS];
+	fragment<accumulator, 16, 16, 16, OUT_T> result_frag;
 
 	// Indices
 	const uint32_t li = threadIdx.x; // index in warp ("lane index")
@@ -544,24 +548,24 @@ __device__ void threadblock_last_layer_forward(Activation activation, __half* __
 
 	TCNN_PRAGMA_UNROLL
 	for (uint32_t i = 0; i < N_BLOCKS; ++i)
-		wmma::load_matrix_sync(weights_frag[i], weights_shmem + 16 * i, WIDTH + SKEW);
+		load_matrix_sync(weights_frag[i], weights_shmem + 16 * i, WIDTH + SKEW);
 
 	// Perform last layer by parallelizing over iters
 	for (uint32_t idx = wi; idx < N_ITERS; idx += N_BLOCKS) {
-		wmma::fill_fragment(result_frag, 0.0f);
+		fill_fragment(result_frag, 0.0f);
 		TCNN_PRAGMA_UNROLL
 		for (uint32_t i = 0; i < N_BLOCKS; ++i) {
 			// Load a chunk of intermediate activations from shared memory and multiply with chunk of the weight matrix
-			wmma::load_matrix_sync(act_frag, act_shmem + 16 * i + (16 * idx) * (WIDTH + SKEW), WIDTH + SKEW);
-			wmma::mma_sync(result_frag, act_frag, weights_frag[i], result_frag);
+			load_matrix_sync(act_frag, act_shmem + 16 * i + (16 * idx) * (WIDTH + SKEW), WIDTH + SKEW);
+			mma_sync(result_frag, act_frag, weights_frag[i], result_frag);
 		}
 
 		warp_activation<__half>(activation, result_frag, result_frag);
 
-		if (output_layout == wmma::mem_row_major) {
-			wmma::store_matrix_sync(out + idx * 16 * output_stride, result_frag, output_stride, output_layout);
+		if (output_layout == mem_row_major) {
+			store_matrix_sync(out + idx * 16 * output_stride, result_frag, output_stride, output_layout);
 		} else {
-			wmma::store_matrix_sync(out + idx * 16, result_frag, output_stride, output_layout);
+			store_matrix_sync(out + idx * 16, result_frag, output_stride, output_layout);
 		}
 	}
 }
@@ -594,7 +598,7 @@ __device__ void threadblock_write_output_static(const __half* __restrict__ act_s
 }
 
 template <int WIDTH, int N_ITERS, typename OUT_T, Activation ACTIVATION, bool INFERENCE>
-__global__ void kernel_mlp_fused(const Activation output_activation, const __half* __restrict__ input, const __half* __restrict__ weights, OUT_T* __restrict__ out_intermediate, OUT_T* __restrict__ out, const uint32_t output_stride, const uint32_t batch_size, const uint32_t in_width, const uint32_t out_width, const uint32_t n_hidden_matmuls, const nvcuda::wmma::layout_t input_layout, const nvcuda::wmma::layout_t output_layout,
+__global__ void kernel_mlp_fused(const Activation output_activation, const __half* __restrict__ input, const __half* __restrict__ weights, OUT_T* __restrict__ out_intermediate, OUT_T* __restrict__ out, const uint32_t output_stride, const uint32_t batch_size, const uint32_t in_width, const uint32_t out_width, const uint32_t n_hidden_matmuls, const rocwmma::layout_t input_layout, const rocwmma::layout_t output_layout,
 	 __half* first_layer_post_gpu_buffer) {
 	// --- 中文注释: 关于此核函数与 `FullyFusedMLP` 类的关系 ---
 	//
@@ -633,7 +637,7 @@ __global__ void kernel_mlp_fused(const Activation output_activation, const __hal
 	// --- 中文注释: 关于此 `if/else` 分支的判断 ---
 	// 在 `mlp_learning_an_image.cu` 的默认配置下，会走 `threadblock_input_layer_forward_dynamic()` 这个动态路径？
 	//
-	// 1.  进入此 `if` 分支（即动态路径）的条件是 `input_layout == nvcuda::wmma::mem_col_major || in_width != WIDTH`。
+	// 1.  进入此 `if` 分支（即动态路径）的条件是 `input_layout == rocwmma::mem_col_major || in_width != WIDTH`。
 	// 2.  在 `mlp_learning_an_image.cu` 中，网络的 `WIDTH` (隐藏层宽度) 由 `"n_neurons"` 决定，默认值为 64。
 	// 3.  网络的输入维度 `in_width` 由其前面的 `Encoding` 层的输出维度决定。
 	// 4.  默认配置中，`Encoding` 为 `"otype": "OneBlob", "n_bins": 32`。`OneBlob` 编码的输出维度就是 `n_bins` 的值。
@@ -641,11 +645,11 @@ __global__ void kernel_mlp_fused(const Activation output_activation, const __hal
 	// 5.  比较两者，`in_width` (32) 不等于 `WIDTH` (64)。
 	//
 	// First layer
-	if (input_layout == nvcuda::wmma::mem_col_major || in_width != WIDTH) {
-		if (input_layout == nvcuda::wmma::mem_row_major) {
-			threadblock_input_layer_forward_dynamic<WIDTH, N_ITERS, OUT_T, nvcuda::wmma::row_major>(ACTIVATION, act_shmem, input + elem_idx * in_width, weights, !INFERENCE ? (out_intermediate + elem_idx * WIDTH) : nullptr, in_width, batch_size);
+	if (input_layout == rocwmma::mem_col_major || in_width != WIDTH) {
+		if (input_layout == rocwmma::mem_row_major) {
+			threadblock_input_layer_forward_dynamic<WIDTH, N_ITERS, OUT_T, rocwmma::row_major>(ACTIVATION, act_shmem, input + elem_idx * in_width, weights, !INFERENCE ? (out_intermediate + elem_idx * WIDTH) : nullptr, in_width, batch_size);
 		} else {
-			threadblock_input_layer_forward_dynamic<WIDTH, N_ITERS, OUT_T, nvcuda::wmma::col_major>(ACTIVATION, act_shmem, input + elem_idx, weights, !INFERENCE ? (out_intermediate + elem_idx * WIDTH) : nullptr, in_width, batch_size);
+			threadblock_input_layer_forward_dynamic<WIDTH, N_ITERS, OUT_T, rocwmma::col_major>(ACTIVATION, act_shmem, input + elem_idx, weights, !INFERENCE ? (out_intermediate + elem_idx * WIDTH) : nullptr, in_width, batch_size);
 		}
 	} else { 
 		// If the input has the same width & layout as the hidden layers, we can simply use the network's regular layer routine (with static size)
@@ -671,7 +675,7 @@ __global__ void kernel_mlp_fused(const Activation output_activation, const __hal
 		}
 	} else if (out) {
 		// Last layer
-		if (output_layout == nvcuda::wmma::mem_row_major) {
+		if (output_layout == rocwmma::mem_row_major) {
 			threadblock_last_layer_forward<WIDTH, N_ITERS, OUT_T>(output_activation, act_shmem, weights + first_weights_stride + weights_stride * n_hidden_matmuls, out + elem_idx * output_stride, output_stride, output_layout);
 		} else {
 			threadblock_last_layer_forward<WIDTH, N_ITERS, OUT_T>(output_activation, act_shmem, weights + first_weights_stride + weights_stride * n_hidden_matmuls, out + elem_idx, output_stride, output_layout);
@@ -754,8 +758,8 @@ std::enable_if_t<std::is_same<__half, T>::value> mlp_fused_forward(
 		output ? output->rows() : 0,
 		n_hidden_layers,
 		// The kernels operate with transposed layouts compared with the MLP code
-		input.layout() == RM ? nvcuda::wmma::mem_col_major : nvcuda::wmma::mem_row_major,
-		output && output->layout() == RM ? nvcuda::wmma::mem_col_major : nvcuda::wmma::mem_row_major,
+		input.layout() == RM ? rocwmma::mem_col_major : rocwmma::mem_row_major,
+		output && output->layout() == RM ? rocwmma::mem_col_major : rocwmma::mem_row_major,
 		first_layer_post_gpu_buffer
 	);
 }
