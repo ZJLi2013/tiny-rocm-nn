@@ -455,7 +455,7 @@ public:
 		ROOT_TYPE* I5      = tmp.data() + n_elements * n_matrices * 3;
 		ROOT_TYPE* sum_tmp = tmp.data() + n_elements * n_matrices * 4;
 
-		hipblasDatatype_t dataType;
+		hipDataType dataType;
 
 		if (std::is_same<ROOT_TYPE, float>::value) {
 			dataType = HIPBLAS_R_32F;
@@ -715,7 +715,7 @@ public:
 				float* L_root_begin = m_L_root[interval.first].data();
 				float* R_root_begin = m_R_root[interval.first].data();
 
-				hipblasDatatype_t data_type = (m_cg_on_momentum || std::is_same<T, float>::value) ? HIPBLAS_R_32F : HIPBLAS_R_16F;
+				hipDataType data_type = (m_cg_on_momentum || std::is_same<T, float>::value) ? HIPBLAS_R_32F : HIPBLAS_R_16F;
 				void* gradient_pointer = m_cg_on_momentum ? (void*)(m_momentum.data() + offset_MN) : (void*)(gradients + offset_MN);
 
 				// m_L[i] = m_beta2 * m_L[i] + (1 - m_beta2) * gradient_matrix * gradient_matrix.transpose();
