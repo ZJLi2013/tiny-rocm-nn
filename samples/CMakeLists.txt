@@ -24,6 +24,5 @@
 # Samples
 ###############################################################################
 
-add_executable(mlp_learning_an_image mlp_learning_an_image.cu ../dependencies/stbi/stbi_wrapper.cpp)
-target_link_libraries(mlp_learning_an_image PUBLIC ${CUDA_LIBRARIES} tiny-cuda-nn)
-
+add_executable(mlp_learning_an_image mlp_learning_an_image.cpp ../dependencies/stbi/stbi_wrapper.cpp)
+target_link_libraries(mlp_learning_an_image PUBLIC tiny-rocm-nn)

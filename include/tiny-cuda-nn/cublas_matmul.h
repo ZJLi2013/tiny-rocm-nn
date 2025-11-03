@@ -81,13 +81,13 @@ void cublas_gemm(
 
 	hipblasSetStream(cublas_handle(), stream);
 
-	hipDataType cuda_data_type = std::is_same<T, float>::value ? HIP_R_32F : HIP_R_16F;
-	hipblasComputeType_t compute_type = HIPBLAS_COMPUTE_32F;  // Use full FP32 for better numerical stability
+	hipblasDatatype_t cuda_data_type = std::is_same<T, float>::value ? HIPBLAS_R_32F : HIPBLAS_R_16F;
+	hipblasGemmAlgo_t algo = HIPBLAS_GEMM_DEFAULT;
 	
 	// Since all matrices are row-major, we can use the identity (A*B)^T = B^T * A^T
 	// and compute C_cm = B_cm * A_cm, which is equivalent to C_rm = A_rm * B_rm
 	// but with swapped arguments.
-	CUBLAS_CHECK_THROW(hipblasGemmEx_v2(
+	CUBLAS_CHECK_THROW(hipblasGemmEx(
 		cublas_handle(),
 		HIPBLAS_OP_N, HIPBLAS_OP_N,
 		n, m, k,
@@ -96,8 +96,8 @@ void cublas_gemm(
 		A.data(), cuda_data_type, A.stride(),
 		&beta,
 		C.data(), cuda_data_type, C.stride(),
-		compute_type,
-		CUBLAS_GEMM_DEFAULT_TENSOR_OP
+		cuda_data_type,
+		algo
 	));
 }
 
@@ -124,10 +124,10 @@ void cublas_gemm(
 
 	hipblasSetStream(cublas_handle(), stream);
 
-	hipDataType cuda_data_type = std::is_same<T, float>::value ? HIP_R_32F : HIP_R_16F;
-	hipblasComputeType_t compute_type = HIPBLAS_COMPUTE_32F;  // Use full FP32 for better numerical stability
+	hipblasDatatype_t cuda_data_type = std::is_same<T, float>::value ? HIPBLAS_R_32F : HIPBLAS_R_16F;
+	hipblasGemmAlgo_t algo = HIPBLAS_GEMM_DEFAULT;
 
-	CUBLAS_CHECK_THROW(hipblasGemmEx_v2(
+	CUBLAS_CHECK_THROW(hipblasGemmEx(
 		cublas_handle(),
 		HIPBLAS_OP_N, HIPBLAS_OP_N,
 		m, n, k,
@@ -136,8 +136,8 @@ void cublas_gemm(
 		B.data(), cuda_data_type, B.stride(),
 		&beta,
 		C.data(), cuda_data_type, C.stride(),
-		compute_type,
-		CUBLAS_GEMM_DEFAULT_TENSOR_OP
+		cuda_data_type,
+		algo
 	));
 }
 
@@ -165,21 +165,18 @@ void cublas_gemm(
 
 	hipblasSetStream(cublas_handle(), stream);
 
-	hipDataType cuda_data_type = std::is_same<T, float>::value ? HIP_R_32F : HIP_R_16F;
-	hipblasComputeType_t compute_type = HIPBLAS_COMPUTE_32F;  // Use full FP32 for better numerical stability
+	hipblasDatatype_t cuda_data_type = std::is_same<T, float>::value ? HIPBLAS_R_32F : HIPBLAS_R_16F;
+	hipblasGemmAlgo_t algo = HIPBLAS_GEMM_DEFAULT;
 	
-	// For FP16 data with HIPBLAS_COMPUTE_32F, alpha/beta should be float
-	// This provides full FP32 precision for accumulation
-
 	// For mixed layouts, we need to carefully handle the transpose operations
-	// cuBLAS is column-major, so we interpret RM matrices as transposed CM matrices
+	// hipBLAS is column-major, so we interpret RM matrices as transposed CM matrices
 	
 	if (LC == RM) {
 		// Output is RM: C_rm (m×n) = A (m×k) * B (k×n)
 		// Use identity: C_rm = A * B ⟺ C_cm^T = B^T * A^T
 		// 
-		// Strategy: Compute C^T using cuBLAS (which outputs CM)
-		// cuBLAS computes: C_cm^T (n×m) = first_matrix * second_matrix
+		// Strategy: Compute C^T using hipBLAS (which outputs CM)
+		// hipBLAS computes: C_cm^T (n×m) = first_matrix * second_matrix
 		// We want: C_cm^T (n×m) = B^T (n×k) * A^T (k×m)
 		// 
 		// Key: RM matrices are already "transposed" when viewed as CM
@@ -190,7 +187,7 @@ void cublas_gemm(
 		hipblasOperation_t op_b = LB == RM ? HIPBLAS_OP_N : HIPBLAS_OP_T;
 		
 		// Swap the operations to match the swapped matrices
-		CUBLAS_CHECK_THROW(hipblasGemmEx_v2(
+		CUBLAS_CHECK_THROW(hipblasGemmEx(
 			cublas_handle(),
 			op_b, op_a,
 			n, m, k,
@@ -199,15 +196,15 @@ void cublas_gemm(
 			A.data(), cuda_data_type, A.stride(),
 			&beta,
 			C.data(), cuda_data_type, C.stride(),
-			compute_type,
-			CUBLAS_GEMM_DEFAULT_TENSOR_OP
+			cuda_data_type,
+			algo
 		));
 	} else {
 		// Output is CM: use standard approach
 		hipblasOperation_t op_a = LA == RM ? HIPBLAS_OP_T : HIPBLAS_OP_N;
 		hipblasOperation_t op_b = LB == RM ? HIPBLAS_OP_T : HIPBLAS_OP_N;
 		
-		CUBLAS_CHECK_THROW(hipblasGemmEx_v2(
+		CUBLAS_CHECK_THROW(hipblasGemmEx(
 			cublas_handle(),
 			op_a, op_b,
 			m, n, k,
@@ -216,8 +213,8 @@ void cublas_gemm(
 			B.data(), cuda_data_type, B.stride(),
 			&beta,
 			C.data(), cuda_data_type, C.stride(),
-			compute_type,
-			CUBLAS_GEMM_DEFAULT_TENSOR_OP
+			cuda_data_type,
+			algo
 		));
 	}
 }

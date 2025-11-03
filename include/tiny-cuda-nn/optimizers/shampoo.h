@@ -37,7 +37,6 @@
 #include <tiny-cuda-nn/optimizer.h>
 #include <tiny-cuda-nn/reduce_sum.h>
 
-#include <mma.h>
 #include <hipblas.h>
 
 #include <stdexcept>
@@ -456,15 +455,12 @@ public:
 		ROOT_TYPE* I5      = tmp.data() + n_elements * n_matrices * 3;
 		ROOT_TYPE* sum_tmp = tmp.data() + n_elements * n_matrices * 4;
 
-		hipDataType dataType;
-		hipblasComputeType_t computeType;
+		hipblasDatatype_t dataType;
 
 		if (std::is_same<ROOT_TYPE, float>::value) {
-			dataType = HIP_R_32F;
-			computeType = HIPBLAS_COMPUTE_32F;
+			dataType = HIPBLAS_R_32F;
 		} else if (std::is_same<ROOT_TYPE, double>::value) {
-			dataType = HIP_R_64F;
-			computeType = HIPBLAS_COMPUTE_64F;
+			dataType = HIPBLAS_R_64F;
 		}
 
 		// Compute c following section 3.2 of the paper http://eprints.ma.man.ac.uk/637/1/covered/MIMS_ep2005_9.pdf
@@ -475,7 +471,7 @@ public:
 			// k=4 seems to give a reasonable amount of numerical stability and accuracy.
 
 			// A^2
-			CUBLAS_CHECK_THROW(hipblasGemmStridedBatchedEx_v2(
+			CUBLAS_CHECK_THROW(hipblasGemmStridedBatchedEx(
 				m_cublas, HIPBLAS_OP_N, HIPBLAS_OP_N,
 				M, M, M,
 				m_one_root,
@@ -484,12 +480,12 @@ public:
 				m_zero_root,
 				tmp1, dataType, M, n_elements,
 				n_matrices,
-				computeType,
+				dataType,
 				HIPBLAS_GEMM_DEFAULT
 			));
 
 			// A^4
-			CUBLAS_CHECK_THROW(hipblasGemmStridedBatchedEx_v2(
+			CUBLAS_CHECK_THROW(hipblasGemmStridedBatchedEx(
 				m_cublas, HIPBLAS_OP_N, HIPBLAS_OP_N,
 				M, M, M,
 				m_one_root,
@@ -498,7 +494,7 @@ public:
 				m_zero_root,
 				tmp2, dataType, M, n_elements,
 				n_matrices,
-				computeType,
+				dataType,
 				HIPBLAS_GEMM_DEFAULT
 			));
 
@@ -524,7 +520,7 @@ public:
 
 		// Xk+1 (one indirect copy to prevent the need for in-place operations)
 		linear_kernel(set_matrix<ROOT_TYPE>, 0, stream, n_elements*n_matrices, tmp2, Xk, 1.0f, n_matrices);
-		CUBLAS_CHECK_THROW(hipblasGemmStridedBatchedEx_v2(
+		CUBLAS_CHECK_THROW(hipblasGemmStridedBatchedEx(
 			m_cublas, HIPBLAS_OP_N, HIPBLAS_OP_N,
 			M, M, M,
 			m_one_root,
@@ -533,7 +529,7 @@ public:
 			m_zero_root,
 			Xk, dataType, M, n_elements,
 			n_matrices,
-			computeType,
+			dataType,
 			HIPBLAS_GEMM_DEFAULT
 		));
 
@@ -549,7 +545,7 @@ public:
 		while (true) {
 			for (int j = 0; j < CHECK_INTERVAL; ++j, ++i) {
 				// tmp1^2
-				CUBLAS_CHECK_THROW(hipblasGemmStridedBatchedEx_v2(
+				CUBLAS_CHECK_THROW(hipblasGemmStridedBatchedEx(
 					m_cublas, HIPBLAS_OP_N, HIPBLAS_OP_N,
 					M, M, M,
 					m_one_root,
@@ -558,12 +554,12 @@ public:
 					m_zero_root,
 					tmp2, dataType, M, n_elements,
 					n_matrices,
-					computeType,
+					dataType,
 					HIPBLAS_GEMM_DEFAULT
 				));
 
 				// tmp2^2
-				CUBLAS_CHECK_THROW(hipblasGemmStridedBatchedEx_v2(
+				CUBLAS_CHECK_THROW(hipblasGemmStridedBatchedEx(
 					m_cublas, HIPBLAS_OP_N, HIPBLAS_OP_N,
 					M, M, M,
 					m_one_root,
@@ -572,13 +568,13 @@ public:
 					m_zero_root,
 					tmp1, dataType, M, n_elements,
 					n_matrices,
-					computeType,
+					dataType,
 					HIPBLAS_GEMM_DEFAULT
 				));
 
 				// Mk+1 (one indirect copy to prevent the need for in-place operations)
 				linear_kernel(set_matrix<ROOT_TYPE>, 0, stream, n_elements*n_matrices, tmp2, Mk, 1.0f, n_matrices);
-				CUBLAS_CHECK_THROW(hipblasGemmStridedBatchedEx_v2(
+				CUBLAS_CHECK_THROW(hipblasGemmStridedBatchedEx(
 					m_cublas, HIPBLAS_OP_N, HIPBLAS_OP_N,
 					M, M, M,
 					m_one_root,
@@ -587,7 +583,7 @@ public:
 					m_zero_root,
 					Mk, dataType, M, n_elements,
 					n_matrices,
-					computeType,
+					dataType,
 					HIPBLAS_GEMM_DEFAULT
 				));
 
@@ -596,7 +592,7 @@ public:
 
 				// Xk+1 (one indirect copy to prevent the need for in-place operations)
 				linear_kernel(set_matrix<ROOT_TYPE>, 0, stream, n_elements*n_matrices, tmp2, Xk, 1.0f, n_matrices);
-				CUBLAS_CHECK_THROW(hipblasGemmStridedBatchedEx_v2(
+				CUBLAS_CHECK_THROW(hipblasGemmStridedBatchedEx(
 					m_cublas, HIPBLAS_OP_N, HIPBLAS_OP_N,
 					M, M, M,
 					m_one_root,
@@ -605,7 +601,7 @@ public:
 					m_zero_root,
 					Xk, dataType, M, n_elements,
 					n_matrices,
-					computeType,
+					dataType,
 					HIPBLAS_GEMM_DEFAULT
 				));
 			}
@@ -719,42 +715,39 @@ public:
 				float* L_root_begin = m_L_root[interval.first].data();
 				float* R_root_begin = m_R_root[interval.first].data();
 
-				hipDataType data_type = (m_cg_on_momentum || std::is_same<T, float>::value) ? HIP_R_32F : HIP_R_16F;
+				hipblasDatatype_t data_type = (m_cg_on_momentum || std::is_same<T, float>::value) ? HIPBLAS_R_32F : HIPBLAS_R_16F;
 				void* gradient_pointer = m_cg_on_momentum ? (void*)(m_momentum.data() + offset_MN) : (void*)(gradients + offset_MN);
-				hipblasComputeType_t compute_type = m_cg_on_momentum ? HIPBLAS_COMPUTE_32F_FAST_TF32 : HIPBLAS_COMPUTE_32F;
 
 				// m_L[i] = m_beta2 * m_L[i] + (1 - m_beta2) * gradient_matrix * gradient_matrix.transpose();
 				CUBLAS_CHECK_THROW(hipblasSetStream(m_cublas, L_stream));
-				CUBLAS_CHECK_THROW(cublasSetWorkspace(m_cublas, L_workspace.data(), L_workspace.size()));
-				CUBLAS_CHECK_THROW(hipblasGemmStridedBatchedEx_v2(
+				CUBLAS_CHECK_THROW(hipblasGemmStridedBatchedEx(
 					m_cublas, HIPBLAS_OP_T, HIPBLAS_OP_N,
 					M, M, N,
 					m_alpha_3,
 					gradient_pointer, data_type, N, gradient_stride,
 					gradient_pointer, data_type, N, gradient_stride,
 					m_beta_3,
-					L_begin, HIP_R_32F, M, L_stride,
+					L_begin, HIPBLAS_R_32F, M, L_stride,
 					n_matrices,
-					compute_type,
-					CUBLAS_GEMM_DEFAULT_TENSOR_OP
+					HIPBLAS_R_32F,
+					HIPBLAS_GEMM_DEFAULT
 				));
 
 				hipEventRecord(L_event, L_stream);
 
 				// m_R[i] = m_beta2 * m_R[i] + (1 - m_beta2) * gradient_matrix.transpose() * gradient_matrix;
 				CUBLAS_CHECK_THROW(hipblasSetStream(m_cublas, R_stream));
-				CUBLAS_CHECK_THROW(cublasSetWorkspace(m_cublas, R_workspace.data(), R_workspace.size()));
-				CUBLAS_CHECK_THROW(hipblasGemmStridedBatchedEx_v2(
+				CUBLAS_CHECK_THROW(hipblasGemmStridedBatchedEx(
 					m_cublas, HIPBLAS_OP_N, HIPBLAS_OP_T,
 					N, N, M,
 					m_alpha_3,
 					gradient_pointer, data_type, N, gradient_stride,
 					gradient_pointer, data_type, N, gradient_stride,
 					m_beta_3,
-					R_begin, HIP_R_32F, N, R_stride,
+					R_begin, HIPBLAS_R_32F, N, R_stride,
 					n_matrices,
-					compute_type,
-					CUBLAS_GEMM_DEFAULT_TENSOR_OP
+					HIPBLAS_R_32F,
+					HIPBLAS_GEMM_DEFAULT
 				));
 
 				hipEventRecord(R_event, R_stream);
@@ -766,34 +759,33 @@ public:
 				// Must wait until after the first step for the L and R matrix roots to get initialized.
 				if (m_current_step-1 > 0) {
 					CUBLAS_CHECK_THROW(hipblasSetStream(m_cublas, update_stream));
-					CUBLAS_CHECK_THROW(cublasSetWorkspace(m_cublas, update_workspace.data(), update_workspace.size()));
 
 					// gradient_matrix = L_root * gradients
-					CUBLAS_CHECK_THROW(hipblasGemmStridedBatchedEx_v2(
+					CUBLAS_CHECK_THROW(hipblasGemmStridedBatchedEx(
 						m_cublas, HIPBLAS_OP_N, HIPBLAS_OP_T,
 						M, N, M,
 						m_one,
-						L_root_begin, HIP_R_32F, M, L_stride,
-						m_momentum.data() + offset_MN, HIP_R_32F, N, gradient_stride,
+						L_root_begin, HIPBLAS_R_32F, M, L_stride,
+						m_momentum.data() + offset_MN, HIPBLAS_R_32F, N, gradient_stride,
 						m_zero,
-						m_gradient_tmp.data() + offset_MN, HIP_R_32F, M, gradient_stride,
+						m_gradient_tmp.data() + offset_MN, HIPBLAS_R_32F, M, gradient_stride,
 						n_matrices,
-						HIPBLAS_COMPUTE_32F_FAST_TF32,
-						CUBLAS_GEMM_DEFAULT_TENSOR_OP
+						HIPBLAS_R_32F,
+						HIPBLAS_GEMM_DEFAULT
 					));
 
 					// gradient_matrix = gradient_matrix * R_root
-					CUBLAS_CHECK_THROW(hipblasGemmStridedBatchedEx_v2(
+					CUBLAS_CHECK_THROW(hipblasGemmStridedBatchedEx(
 						m_cublas, HIPBLAS_OP_N, HIPBLAS_OP_N,
 						M, N, N,
 						m_alpha_shampoo_coef,
-						m_gradient_tmp.data() + offset_MN, HIP_R_32F, M, gradient_stride,
-						R_root_begin, HIP_R_32F, N, R_stride,
+						m_gradient_tmp.data() + offset_MN, HIPBLAS_R_32F, M, gradient_stride,
+						R_root_begin, HIPBLAS_R_32F, N, R_stride,
 						m_beta_shampoo_coef,
-						m_shampoo_momentum.data() + offset_MN, HIP_R_32F, M, gradient_stride,
+						m_shampoo_momentum.data() + offset_MN, HIPBLAS_R_32F, M, gradient_stride,
 						n_matrices,
-						HIPBLAS_COMPUTE_32F_FAST_TF32,
-						CUBLAS_GEMM_DEFAULT_TENSOR_OP
+						HIPBLAS_R_32F,
+						HIPBLAS_GEMM_DEFAULT
 					));
 
 					if (m_frobenius_normalization) {
