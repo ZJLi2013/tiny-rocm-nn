@@ -588,8 +588,8 @@ public:
 		access_desc.location.id = prop.location.id;
 		access_desc.flags = hipMemAccessFlagsProtReadWrite;
 
-		CU_CHECK_THROW(hipMemMap(m_base_address + m_size, n_bytes_to_allocate, 0, m_handles.back(), 0));
-		CU_CHECK_THROW(hipMemSetAccess(m_base_address + m_size, n_bytes_to_allocate, &access_desc, 1));
+		CU_CHECK_THROW(hipMemMap((char*)m_base_address + m_size, n_bytes_to_allocate, 0, m_handles.back(), 0));
+		CU_CHECK_THROW(hipMemSetAccess((char*)m_base_address + m_size, n_bytes_to_allocate, &access_desc, 1));
 		m_size += n_bytes_to_allocate;
 
 		total_n_bytes_allocated() += n_bytes_to_allocate;
