@@ -30,8 +30,6 @@
 #include <tiny-cuda-nn/common_device.h>
 #include <tiny-cuda-nn/network.h>
 
-#include <tiny-cuda-nn/networks/cutlass_mlp.h>
-
 #if TCNN_MIN_GPU_ARCH > 70
 #include <tiny-cuda-nn/networks/fully_fused_mlp.h>
 #endif
@@ -47,32 +45,26 @@ template void extract_dimension_pos_neg(cudaStream_t stream, const uint32_t num_
 
 std::string select_network(const json& network) {
 	std::string otype = network.value("otype", "MLP");
-	bool want_fully_fused_mlp = equals_case_insensitive(otype, "MegakernelMLP") || equals_case_insensitive(otype, "FullyFusedMLP");
-	bool want_cutlass_mlp = equals_case_insensitive(otype, "MLP") || equals_case_insensitive(otype, "CutlassMLP");
+	bool want_fully_fused_mlp = equals_case_insensitive(otype, "MegakernelMLP") || equals_case_insensitive(otype, "FullyFusedMLP") || equals_case_insensitive(otype, "MLP");
 
-	// If the GPU architecture is insufficient for
 	if (MIN_GPU_ARCH <= 70 || std::is_same<network_precision_t, float>::value) {
 		if (want_fully_fused_mlp && MIN_GPU_ARCH <= 70) {
-			log_warning(
-				"FullyFusedMLP is not supported for the selected architecture {}. Falling back to CutlassMLP. "
-				"For maximum performance, raise the target GPU architecture to 75+.",
+			throw std::runtime_error{fmt::format(
+				"FullyFusedMLP is not supported for GPU architecture {}. "
+				"Requires architecture 75+.",
 				MIN_GPU_ARCH
-			);
+			)};
 		}
-
-		want_cutlass_mlp |= want_fully_fused_mlp;
-		want_fully_fused_mlp = false;
+		if (want_fully_fused_mlp && std::is_same<network_precision_t, float>::value) {
+			throw std::runtime_error{"FullyFusedMLP requires half precision (__half), not float."};
+		}
 	}
 
-	// FIXME 
-	want_cutlass_mlp = false ;
 	if (want_fully_fused_mlp) {
 		return "FullyFusedMLP";
-	} else if (want_cutlass_mlp) {
-		return "CutlassMLP";
-	} else {
-		return otype;
 	}
+	
+	return otype;
 }
 
 uint32_t minimum_alignment(const json& network) {
@@ -86,15 +78,14 @@ uint32_t minimum_alignment(const json& network) {
 			case  32: return FullyFusedMLP<network_precision_t,  32>::REQUIRED_ALIGNMENT();
 			case  64: return FullyFusedMLP<network_precision_t,  64>::REQUIRED_ALIGNMENT();
 			case 128: return FullyFusedMLP<network_precision_t, 128>::REQUIRED_ALIGNMENT();
-			default: throw std::runtime_error{fmt::format("FullyFusedMLP only supports 16, 32, 64, and 128 neurons, but got {}. Use CutlassMLP instead if this is a requirement.", n_neurons)};
+			default: throw std::runtime_error{fmt::format("FullyFusedMLP only supports 16, 32, 64, and 128 neurons, but got {}.", n_neurons)};
 		}
 #else
 		throw std::runtime_error{"FullyFusedMLP was not compiled due to insufficient GPU arch of <=70."};
 #endif
-	} 
-	// else {
-	// 	return CutlassMLP<network_precision_t>::REQUIRED_ALIGNMENT();
-	// }
+	}
+	
+	throw std::runtime_error{fmt::format("Unsupported network type: {}", network_type)};
 }
 
 template <typename T>
@@ -119,7 +110,7 @@ Network<T>* create_network(const json& network) {
 				case  32: return new FullyFusedMLP<T,  32>{TCNN_FULLY_FUSED_PARAMS};
 				case  64: return new FullyFusedMLP<T,  64>{TCNN_FULLY_FUSED_PARAMS};
 				case 128: return new FullyFusedMLP<T, 128>{TCNN_FULLY_FUSED_PARAMS};
-				default: throw std::runtime_error{fmt::format("FullyFusedMLP only supports 16, 32, 64, and 128 neurons, but got {}. Use CutlassMLP instead if this is a requirement.", n_neurons)};
+				default: throw std::runtime_error{fmt::format("FullyFusedMLP only supports 16, 32, 64, and 128 neurons, but got {}.", n_neurons)};
 			}
 #  undef TCNN_FULLY_FUSED_PARAMS
 #else //TCNN_MIN_GPU_ARCH > 70
@@ -127,18 +118,8 @@ Network<T>* create_network(const json& network) {
 #endif //TCNN_MIN_GPU_ARCH > 70
 		}
 	}
-    // else if (equals_case_insensitive(network_type, "CutlassMLP")) {
-	// 	return new CutlassMLP<T>{
-	// 		network["n_input_dims"],
-	// 		network.value("n_neurons", 128u),
-	// 		network["n_output_dims"],
-	// 		network.value("n_hidden_layers", 5u),
-	// 		string_to_activation(network.value("activation", "ReLU")),
-	// 		string_to_activation(network.value("output_activation", "None")),
-	// 	};
-	// }
 
-	throw std::runtime_error{fmt::format("Invalid network type: {}", network_type)};
+	throw std::runtime_error{fmt::format("Unsupported network type: {}", network_type)};
 }
 
 template Network<network_precision_t>* create_network(const json& network);
@@ -146,7 +127,6 @@ template Network<network_precision_t>* create_network(const json& network);
 std::vector<std::string> builtin_networks() {
 	return {
 		"FullyFusedMLP",
-	// 	"CutlassMLP",
 	};
 }
 }

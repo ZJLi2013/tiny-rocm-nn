@@ -90,7 +90,7 @@ producing an image every couple of training steps. Each 1000 steps should take a
   - __Windows:__ CUDA 11.5 or higher
   - __Linux:__ CUDA 10.2 or higher
 - __[CMake](https://cmake.org/) v3.21 or higher__.
-- The fully fused MLP component of this framework requires a __very large__ amount of shared memory in its default configuration. It will likely only work on an RTX 3090, an RTX 2080 Ti, or higher-end GPUs. Lower end cards must reduce the `n_neurons` parameter or use the `CutlassMLP` (better compatibility but slower) instead.
+- The fully fused MLP component of this framework requires a __very large__ amount of shared memory in its default configuration. It will likely only work on an RTX 3090, an RTX 2080 Ti, or higher-end GPUs. Lower end cards must reduce the `n_neurons` parameter.
 
 If you are using Linux, install the following packages
 ```sh
@@ -174,8 +174,7 @@ Following is a summary of the components of this framework. [The JSON documentat
 
 | Networks | &nbsp; | &nbsp;
 | :--- | :---------- | :-----
-| Fully fused MLP | `src/fully_fused_mlp.cu` | Lightning fast implementation of small multi-layer perceptrons (MLPs).
-| CUTLASS MLP     | `src/cutlass_mlp.cu`     | MLP based on [CUTLASS](https://github.com/NVIDIA/cutlass)' GEMM routines. Slower than fully-fused, but handles larger networks and still is reasonably fast.
+| Fully fused MLP | `src/fully_fused_mlp.cu` | Lightning fast implementation of small multi-layer perceptrons (MLPs). Restricted to hidden layers of size 16, 32, 64, or 128.
 
 | Input encodings | &nbsp; | &nbsp;
 | :--- | :---------- | :-----

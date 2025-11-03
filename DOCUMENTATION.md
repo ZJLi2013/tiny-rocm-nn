@@ -43,20 +43,6 @@ Lightning fast implementation of small multi-layer perceptrons (MLPs). Restricte
 }
 ```
 
-### CUTLASS MLP
-
-Multi-layer perceptron (MLP) based on [CUTLASS](https://github.com/NVIDIA/cutlass)' GEMM routines. Slower than the fully fused MLP, but allows for arbitrary numbers of hidden and output neurons. Like the fully fused MLP, it outperforms TensorFlow for small networks.
-
-```json5
-{
-	"otype": "CutlassMLP",       // Component type.
-	"activation": "ReLU",        // Activation of hidden layers.
-	"output_activation": "None", // Activation of the output layer.
-	"n_neurons": 128,            // Neurons in each hidden layer.
-	"n_hidden_layers": 5         // Number of hidden layers.
-}
-```
-
 ## Encodings
 
 

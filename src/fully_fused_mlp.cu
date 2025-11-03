@@ -40,7 +40,7 @@ namespace tcnn {
 
 void check_shmem_error(cudaError_t error) {
 	if (error != cudaSuccess) {
-		throw std::runtime_error{"FullyFusedMLP: insufficient shared memory available on the GPU. Reduce `n_neurons` or use `CutlassMLP` (better compatibility but slower) instead."};
+		throw std::runtime_error{"FullyFusedMLP: insufficient shared memory available on the GPU. Reduce `n_neurons` to fit available shared memory."};
 	}
 }
 
