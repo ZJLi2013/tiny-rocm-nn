@@ -43,7 +43,13 @@ template <typename T>
 inline __device__ T warp_reduce(T val) {
 	TCNN_PRAGMA_UNROLL
 	for (int offset = warpSize/2; offset > 0; offset /= 2) {
+		// AMD GPUs require 64-bit mask (0xffffffffffffffffULL) for wave size 64
+		// NVIDIA GPUs use 32-bit mask (0xffffffff) for warp size 32
+		#ifdef __HIP_PLATFORM_AMD__
+		val += __shfl_xor_sync(0xffffffffffffffffULL, val, offset);
+		#else
 		val += __shfl_xor_sync(0xffffffff, val, offset);
+		#endif
 	}
 
 	return val;

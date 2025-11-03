@@ -59,7 +59,11 @@ __device__ inline float one_blob_subwarp_aligned(F kernel, MatrixView<const floa
 	// Note that this procedure necessitates making the OneBlob encoding wrap around (hence also the 3 kernel calls above),
 	// which may not always be desired.
 	// If not desired, use the slower implementation without wraparound below.
+	#ifdef __HIP_PLATFORM_AMD__
+	float right_cdf = __shfl_sync(0xffffffffffffffffULL, left_cdf, bin_index + 1, n_bins);
+	#else
 	float right_cdf = __shfl_sync(0xffffffff, left_cdf, bin_index + 1, n_bins);
+	#endif
 	if (bin_index == n_bins - 1) {
 		right_cdf += 1; // The right CDF must gain a 1 due to wrapping from right to left (it lost one (hopefully) saturated CDF)
 	}
