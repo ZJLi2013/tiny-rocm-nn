@@ -343,10 +343,10 @@ std::enable_if_t<std::is_same<__half, T>::value> mlp_fused_backward(
 	
 	// The kernels operate with transposed layouts compared with the MLP code
 	if (dL_doutput.layout() == RM) {
-		check_shmem_error(hipFuncSetAttribute(reinterpret_cast<const void*>(kernel_mlp_fused_backward<WIDTH), N_ITERS, ACTIVATION, rocwmma::col_major>, hipFuncAttributeMaxDynamicSharedMemorySize, shmem_size));
+		check_shmem_error(hipFuncSetAttribute(reinterpret_cast<const void*>(kernel_mlp_fused_backward<WIDTH, N_ITERS, ACTIVATION, rocwmma::col_major>), hipFuncAttributeMaxDynamicSharedMemorySize, shmem_size));
 		kernel_mlp_fused_backward<WIDTH, N_ITERS, ACTIVATION, rocwmma::col_major><<<blocks, threads, shmem_size, stream>>>(dL_doutput.data(), weights.data(), temporaries.data(), forward.data(), dL_dinput ? dL_dinput->data() : nullptr, weights_first_layer.data(), dL_doutput.stride(), batch_size, out_width, n_hidden_matmuls);
 	} else {
-		check_shmem_error(hipFuncSetAttribute(reinterpret_cast<const void*>(kernel_mlp_fused_backward<WIDTH), N_ITERS, ACTIVATION, rocwmma::row_major>, hipFuncAttributeMaxDynamicSharedMemorySize, shmem_size));
+		check_shmem_error(hipFuncSetAttribute(reinterpret_cast<const void*>(kernel_mlp_fused_backward<WIDTH, N_ITERS, ACTIVATION, rocwmma::row_major>), hipFuncAttributeMaxDynamicSharedMemorySize, shmem_size));
 		kernel_mlp_fused_backward<WIDTH, N_ITERS, ACTIVATION, rocwmma::row_major><<<blocks, threads, shmem_size, stream>>>(dL_doutput.data(), weights.data(), temporaries.data(), forward.data(), dL_dinput ? dL_dinput->data() : nullptr, weights_first_layer.data(), dL_doutput.stride(), batch_size, out_width, n_hidden_matmuls);
 	}
 }
