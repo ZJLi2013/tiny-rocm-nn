@@ -56,6 +56,14 @@ static int g_gemm_call_counter = 0;
 static int g_fc_multiply_call_counter = 0;
 static int g_fc_multiply_split_k_call_counter = 0;
 
+// Helper to check if we should log this call (sample every Nth call after initial burst)
+inline bool should_log_gemm_call(int call_num) {
+	if (call_num <= 20) return true;  // Log first 20 calls
+	if (call_num >= 190 && call_num <= 210) return true;  // Log around where NaN appears (GEMM #195)
+	if (call_num % 100 == 0) return true;  // Sample every 100th call
+	return false;
+}
+
 // Helper function to sample matrix values for debugging
 template <typename T>
 void sample_matrix_values(hipStream_t stream, const T* data, uint32_t m, uint32_t n, const char* name) {
@@ -118,7 +126,7 @@ void cublas_gemm(
 	
 #if ENABLE_HIPBLAS_DEBUG_LOGGING
 	++g_gemm_call_counter;
-	if (g_gemm_call_counter <= MAX_DEBUG_GEMM_CALLS) {
+	if (should_log_gemm_call(g_gemm_call_counter)) {
 		printf("\n[hipBLAS GEMM #%d] RM×RM→RM\n", g_gemm_call_counter);
 		printf("  Dimensions: A[%d,%d] × B[%d,%d] → C[%d,%d]\n", m, k, k, n, m, n);
 		printf("  Strides: A=%d, B=%d, C=%d\n", A.stride(), B.stride(), C.stride());
@@ -146,8 +154,16 @@ void cublas_gemm(
 	));
 
 #if ENABLE_HIPBLAS_DEBUG_LOGGING
-	if (g_gemm_call_counter <= MAX_DEBUG_GEMM_CALLS) {
+	if (should_log_gemm_call(g_gemm_call_counter)) {
 		sample_matrix_values(stream, C.data(), m, n, "C_output");
+		// Check for NaN in output
+		std::vector<T> check_sample(1);
+		CUDA_CHECK_THROW(hipMemcpyAsync(check_sample.data(), C.data(), sizeof(T), hipMemcpyDeviceToHost, stream));
+		CUDA_CHECK_THROW(hipStreamSynchronize(stream));
+		if (std::isnan((float)check_sample[0])) {
+			printf("  ⚠️  WARNING: NaN detected in output at GEMM #%d!\n", g_gemm_call_counter);
+			printf("  This is the FIRST occurrence of NaN in matrix multiplication output.\n");
+		}
 	}
 #endif
 }
