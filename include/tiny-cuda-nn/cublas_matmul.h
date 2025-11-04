@@ -82,6 +82,7 @@ void cublas_gemm(
 	hipblasSetStream(cublas_handle(), stream);
 
 	hipDataType cuda_data_type = std::is_same<T, float>::value ? HIPBLAS_R_32F : HIPBLAS_R_16F;
+	hipblasComputeType_t compute_type = std::is_same<T, float>::value ? HIPBLAS_COMPUTE_32F : HIPBLAS_COMPUTE_16F;
 	hipblasGemmAlgo_t algo = HIPBLAS_GEMM_DEFAULT;
 	
 	// Since all matrices are row-major, we can use the identity (A*B)^T = B^T * A^T
@@ -96,7 +97,7 @@ void cublas_gemm(
 		A.data(), cuda_data_type, A.stride(),
 		&beta,
 		C.data(), cuda_data_type, C.stride(),
-		cuda_data_type,
+		compute_type,
 		algo
 	));
 }
@@ -125,6 +126,7 @@ void cublas_gemm(
 	hipblasSetStream(cublas_handle(), stream);
 
 	hipDataType cuda_data_type = std::is_same<T, float>::value ? HIPBLAS_R_32F : HIPBLAS_R_16F;
+	hipblasComputeType_t compute_type = std::is_same<T, float>::value ? HIPBLAS_COMPUTE_32F : HIPBLAS_COMPUTE_16F;
 	hipblasGemmAlgo_t algo = HIPBLAS_GEMM_DEFAULT;
 
 	CUBLAS_CHECK_THROW(hipblasGemmEx(
@@ -136,7 +138,7 @@ void cublas_gemm(
 		B.data(), cuda_data_type, B.stride(),
 		&beta,
 		C.data(), cuda_data_type, C.stride(),
-		cuda_data_type,
+		compute_type,
 		algo
 	));
 }
@@ -166,6 +168,7 @@ void cublas_gemm(
 	hipblasSetStream(cublas_handle(), stream);
 
 	hipDataType cuda_data_type = std::is_same<T, float>::value ? HIPBLAS_R_32F : HIPBLAS_R_16F;
+	hipblasComputeType_t compute_type = std::is_same<T, float>::value ? HIPBLAS_COMPUTE_32F : HIPBLAS_COMPUTE_16F;
 	hipblasGemmAlgo_t algo = HIPBLAS_GEMM_DEFAULT;
 	
 	// For mixed layouts, we need to carefully handle the transpose operations
@@ -196,7 +199,7 @@ void cublas_gemm(
 			A.data(), cuda_data_type, A.stride(),
 			&beta,
 			C.data(), cuda_data_type, C.stride(),
-			cuda_data_type,
+			compute_type,
 			algo
 		));
 	} else {
@@ -213,7 +216,7 @@ void cublas_gemm(
 			B.data(), cuda_data_type, B.stride(),
 			&beta,
 			C.data(), cuda_data_type, C.stride(),
-			cuda_data_type,
+			compute_type,
 			algo
 		));
 	}
