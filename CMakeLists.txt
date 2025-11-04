@@ -70,6 +70,7 @@ set(ROCM_INCLUDE_DIR "/opt/rocm/include/")
 find_package(hip REQUIRED)
 find_package(hiprtc REQUIRED)
 find_package(rocblas REQUIRED)
+find_package(hipblas REQUIRED)
 
 # Include directories - add all ROCm include paths
 include_directories(${ROCM_INCLUDE_DIR})
@@ -131,7 +132,7 @@ target_include_directories(tiny-rocm-nn PUBLIC
 	${ROCM_INCLUDE_DIR}/rocblas
 	${ROCM_INCLUDE_DIR}/rocwmma
 )
-target_link_libraries(tiny-rocm-nn PUBLIC hip::device hip::host roc::rocblas fmt)
+target_link_libraries(tiny-rocm-nn PUBLIC hip::device hip::host roc::rocblas roc::hipblas fmt)
 
 if (TCNN_BUILD_EXAMPLES)
 	add_subdirectory("samples")
