@@ -35,6 +35,12 @@
 #include <cmath>
 #include <limits>
 
+#if defined(__HIPCC__)
+// Ensure HIP runtime and atomic headers are included
+#include "hip/hip_runtime.h"
+#include "hip/hip_fp16.h"
+#endif
+
 namespace tcnn {
 
 template <class...> struct conjunction : std::true_type {};
