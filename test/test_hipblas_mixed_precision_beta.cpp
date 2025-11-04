@@ -11,6 +11,7 @@
 
 #include <hip/hip_runtime.h>
 #include <hipblas.h>
+#include "hip/hip_fp16.h"
 #include <iostream>
 #include <vector>
 #include <cmath>
@@ -189,8 +190,8 @@ int main() {
     }
     std::cout << std::endl;
 
-    // Test 3: Use hipblasHgemm (native FP16) instead
-    std::cout << "=== Test 3: hipblasHgemm (native FP16) with beta=1.0 ===" << std::endl;
+    // Test 3: Use hipblasGemmEx with FP16 compute (HIPBLAS_COMPUTE_16F) + beta=1.0
+    std::cout << "=== Test 3: hipblasGemmEx with FP16 data + FP16 compute + beta=1.0 ===" << std::endl;
     
     // Reset C
     for (int i = 0; i < m * n; ++i) {
@@ -201,18 +202,22 @@ int main() {
     __half alpha_h = __float2half(1.0f);
     __half beta_h = __float2half(1.0f);
     
-    std::cout << "Using hipblasHgemm (native FP16 function)" << std::endl;
+    std::cout << "Using hipblasGemmEx with FP16 compute (matching data type)" << std::endl;
+    std::cout << "Parameters: alpha_h=1.0, beta_h=1.0" << std::endl;
+    std::cout << "Data type: HIPBLAS_R_16F, Compute type: HIPBLAS_COMPUTE_16F" << std::endl;
     std::cout << std::endl;
 
-    HIPBLAS_CHECK(hipblasHgemm(
+    HIPBLAS_CHECK(hipblasGemmEx(
         handle,
         HIPBLAS_OP_N, HIPBLAS_OP_N,
         m, n, k,
         &alpha_h,
-        d_A, m,
-        d_B, k,
+        d_A, HIPBLAS_R_16F, m,
+        d_B, HIPBLAS_R_16F, k,
         &beta_h,
-        d_C, m
+        d_C, HIPBLAS_R_16F, m,
+        HIPBLAS_COMPUTE_16F,  // Match compute type with data type
+        HIPBLAS_GEMM_DEFAULT
     ));
 
     HIP_CHECK(hipMemcpy(h_C.data(), d_C, m * n * sizeof(__half), hipMemcpyDeviceToHost));
@@ -229,10 +234,11 @@ int main() {
     }
     
     if (has_nan) {
-        std::cout << "❌ FAILED: NaN detected with hipblasHgemm!" << std::endl;
+        std::cout << "❌ FAILED: NaN detected with FP16 compute!" << std::endl;
+        std::cout << "FP16 compute may cause overflow in accumulation." << std::endl;
     } else {
-        std::cout << "✓ PASSED: hipblasHgemm works correctly with beta=1.0!" << std::endl;
-        std::cout << "This is the solution for v13!" << std::endl;
+        std::cout << "✓ PASSED: FP16 compute works with beta=1.0" << std::endl;
+        std::cout << "But may still overflow with many accumulations (see v11.log)" << std::endl;
     }
     std::cout << std::endl;
 
