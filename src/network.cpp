@@ -47,6 +47,8 @@ std::string select_network(const json& network) {
 	std::string otype = network.value("otype", "MLP");
 	bool want_fully_fused_mlp = equals_case_insensitive(otype, "MegakernelMLP") || equals_case_insensitive(otype, "FullyFusedMLP") || equals_case_insensitive(otype, "MLP");
 
+#ifndef __HIP_PLATFORM_AMD__
+	// NVIDIA-specific architecture check (AMD GPUs use different architecture numbering)
 	if (MIN_GPU_ARCH <= 70 || std::is_same<network_precision_t, float>::value) {
 		if (want_fully_fused_mlp && MIN_GPU_ARCH <= 70) {
 			throw std::runtime_error{fmt::format(
@@ -59,6 +61,12 @@ std::string select_network(const json& network) {
 			throw std::runtime_error{"FullyFusedMLP requires half precision (__half), not float."};
 		}
 	}
+#else
+	// AMD GPUs: only check precision requirement
+	if (want_fully_fused_mlp && std::is_same<network_precision_t, float>::value) {
+		throw std::runtime_error{"FullyFusedMLP requires half precision (__half), not float."};
+	}
+#endif
 
 	if (want_fully_fused_mlp) {
 		return "FullyFusedMLP";
