@@ -82,7 +82,8 @@ void cublas_gemm(
 	hipblasSetStream(cublas_handle(), stream);
 
 	hipDataType cuda_data_type = std::is_same<T, float>::value ? HIPBLAS_R_32F : HIPBLAS_R_16F;
-	hipblasComputeType_t compute_type = std::is_same<T, float>::value ? HIPBLAS_COMPUTE_32F : HIPBLAS_COMPUTE_16F;
+	// Experiment: Force FP32 compute type for all operations to test numerical precision
+	hipblasComputeType_t compute_type = HIPBLAS_COMPUTE_32F;
 	hipblasGemmAlgo_t algo = HIPBLAS_GEMM_DEFAULT;
 	
 	// Since all matrices are row-major, we can use the identity (A*B)^T = B^T * A^T
@@ -126,7 +127,8 @@ void cublas_gemm(
 	hipblasSetStream(cublas_handle(), stream);
 
 	hipDataType cuda_data_type = std::is_same<T, float>::value ? HIPBLAS_R_32F : HIPBLAS_R_16F;
-	hipblasComputeType_t compute_type = std::is_same<T, float>::value ? HIPBLAS_COMPUTE_32F : HIPBLAS_COMPUTE_16F;
+	// Experiment: Force FP32 compute type for all operations to test numerical precision
+	hipblasComputeType_t compute_type = HIPBLAS_COMPUTE_32F;
 	hipblasGemmAlgo_t algo = HIPBLAS_GEMM_DEFAULT;
 
 	CUBLAS_CHECK_THROW(hipblasGemmEx(
@@ -168,7 +170,8 @@ void cublas_gemm(
 	hipblasSetStream(cublas_handle(), stream);
 
 	hipDataType cuda_data_type = std::is_same<T, float>::value ? HIPBLAS_R_32F : HIPBLAS_R_16F;
-	hipblasComputeType_t compute_type = std::is_same<T, float>::value ? HIPBLAS_COMPUTE_32F : HIPBLAS_COMPUTE_16F;
+	// Experiment: Force FP32 compute type for all operations to test numerical precision
+	hipblasComputeType_t compute_type = HIPBLAS_COMPUTE_32F;
 	hipblasGemmAlgo_t algo = HIPBLAS_GEMM_DEFAULT;
 	
 	// For mixed layouts, we need to carefully handle the transpose operations
