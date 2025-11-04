@@ -296,35 +296,30 @@ void cublas_gemm(
 		hipblasOperation_t op_a = LA == RM ? HIPBLAS_OP_N : HIPBLAS_OP_T;
 		hipblasOperation_t op_b = LB == RM ? HIPBLAS_OP_N : HIPBLAS_OP_T;
 		
-		// Fix leading dimensions for transposed operations
-		// For op_a=T: A is CM[m,k], transposed becomes [k,m], so lda should be m (not k)
-		// For op_b=T: B is RM[k,n], transposed becomes [n,k], so ldb should be k (not n)
-		int lda = (op_a == HIPBLAS_OP_T) ? m : k;  // Leading dim of A (after considering transpose)
-		int ldb = (op_b == HIPBLAS_OP_T) ? k : n;  // Leading dim of B (after considering transpose)
-		int ldc = n;  // Leading dim of C (RM output, so stride = n)
-		
 #if ENABLE_HIPBLAS_DEBUG_LOGGING
 		if (should_log) {
 			printf("  Output is RM: using transposed computation\n");
 			printf("  op_b=%s, op_a=%s (swapped order)\n", 
 				   op_b == HIPBLAS_OP_N ? "N" : "T",
 				   op_a == HIPBLAS_OP_N ? "N" : "T");
-			printf("  Leading dims: lda=%d, ldb=%d, ldc=%d (corrected for transpose)\n", lda, ldb, ldc);
+			printf("  Using stride() directly: A.stride()=%d, B.stride()=%d, C.stride()=%d\n", 
+				   A.stride(), B.stride(), C.stride());
 			sample_matrix_values(stream, A.data(), m, k, "A");
 			sample_matrix_values(stream, B.data(), k, n, "B");
 		}
 #endif
 		
 		// Swap the operations to match the swapped matrices
+		// Use stride() directly like NVIDIA cuBLAS (not calculated leading dims)
 		CUBLAS_CHECK_THROW(hipblasGemmEx(
 			cublas_handle(),
 			op_b, op_a,
 			n, m, k,
 			&alpha,
-			B.data(), cuda_data_type, ldb,
-			A.data(), cuda_data_type, lda,
+			B.data(), cuda_data_type, B.stride(),
+			A.data(), cuda_data_type, A.stride(),
 			&beta,
-			C.data(), cuda_data_type, ldc,
+			C.data(), cuda_data_type, C.stride(),
 			compute_type,
 			algo
 		));
@@ -333,32 +328,29 @@ void cublas_gemm(
 		hipblasOperation_t op_a = LA == RM ? HIPBLAS_OP_T : HIPBLAS_OP_N;
 		hipblasOperation_t op_b = LB == RM ? HIPBLAS_OP_T : HIPBLAS_OP_N;
 		
-		// Fix leading dimensions for transposed operations
-		int lda = (op_a == HIPBLAS_OP_T) ? k : m;  // Leading dim of A
-		int ldb = (op_b == HIPBLAS_OP_T) ? n : k;  // Leading dim of B
-		int ldc = m;  // Leading dim of C (CM output)
-		
 #if ENABLE_HIPBLAS_DEBUG_LOGGING
 		if (should_log) {
 			printf("  Output is CM: using standard computation\n");
 			printf("  op_a=%s, op_b=%s\n", 
 				   op_a == HIPBLAS_OP_N ? "N" : "T",
 				   op_b == HIPBLAS_OP_N ? "N" : "T");
-			printf("  Leading dims: lda=%d, ldb=%d, ldc=%d (corrected for transpose)\n", lda, ldb, ldc);
+			printf("  Using stride() directly: A.stride()=%d, B.stride()=%d, C.stride()=%d\n",
+				   A.stride(), B.stride(), C.stride());
 			sample_matrix_values(stream, A.data(), m, k, "A");
 			sample_matrix_values(stream, B.data(), k, n, "B");
 		}
 #endif
 		
+		// Use stride() directly like NVIDIA cuBLAS (not calculated leading dims)
 		CUBLAS_CHECK_THROW(hipblasGemmEx(
 			cublas_handle(),
 			op_a, op_b,
 			m, n, k,
 			&alpha,
-			A.data(), cuda_data_type, lda,
-			B.data(), cuda_data_type, ldb,
+			A.data(), cuda_data_type, A.stride(),
+			B.data(), cuda_data_type, B.stride(),
 			&beta,
-			C.data(), cuda_data_type, ldc,
+			C.data(), cuda_data_type, C.stride(),
 			compute_type,
 			algo
 		));
