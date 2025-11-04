@@ -81,6 +81,63 @@ void save_image(const T* image, int width, int height, int n_channels, int chann
 	save_stbi(image_ldr_host.data(), width, height, n_channels, filename.c_str());
 }
 
+#ifdef __HIP_PLATFORM_AMD__
+// AMD GPUs don't support hardware texture sampling - use manual bilinear interpolation
+template <uint32_t stride>
+__global__ void eval_image(uint32_t n_elements, const float* __restrict__ image_data, int width, int height, float* __restrict__ xs_and_ys, float* __restrict__ result) {
+	uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+	if (i >= n_elements) return;
+
+	uint32_t output_idx = i * stride;
+	uint32_t input_idx = i * 2;
+
+	// Normalized coordinates [0, 1]
+	float x = xs_and_ys[input_idx];
+	float y = xs_and_ys[input_idx + 1];
+
+	// Convert to pixel coordinates
+	float px = x * width - 0.5f;
+	float py = y * height - 0.5f;
+
+	// Clamp to valid range
+	px = fmaxf(0.0f, fminf(px, width - 1.0f));
+	py = fmaxf(0.0f, fminf(py, height - 1.0f));
+
+	// Bilinear interpolation
+	int x0 = (int)floorf(px);
+	int y0 = (int)floorf(py);
+	int x1 = min(x0 + 1, width - 1);
+	int y1 = min(y0 + 1, height - 1);
+
+	float fx = px - x0;
+	float fy = py - y0;
+
+	// Sample 4 neighboring pixels (RGBA format, 4 channels)
+	int idx00 = (y0 * width + x0) * 4;
+	int idx10 = (y0 * width + x1) * 4;
+	int idx01 = (y1 * width + x0) * 4;
+	int idx11 = (y1 * width + x1) * 4;
+
+	// Bilinear interpolation for RGB channels
+	for (int c = 0; c < 3; ++c) {
+		float val00 = image_data[idx00 + c];
+		float val10 = image_data[idx10 + c];
+		float val01 = image_data[idx01 + c];
+		float val11 = image_data[idx11 + c];
+
+		float val0 = val00 * (1.0f - fx) + val10 * fx;
+		float val1 = val01 * (1.0f - fx) + val11 * fx;
+		float val = val0 * (1.0f - fy) + val1 * fy;
+
+		result[output_idx + c] = val;
+	}
+
+	for (uint32_t j = 3; j < stride; ++j) {
+		result[output_idx + j] = 1;
+	}
+}
+#else
+// NVIDIA GPUs use hardware texture sampling
 template <uint32_t stride>
 __global__ void eval_image(uint32_t n_elements, hipTextureObject_t texture, float* __restrict__ xs_and_ys, float* __restrict__ result) {
 	uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -98,6 +155,7 @@ __global__ void eval_image(uint32_t n_elements, hipTextureObject_t texture, floa
 		result[output_idx + i] = 1;
 	}
 }
+#endif
 
 int main(int argc, char* argv[]) {
 	try {
@@ -207,7 +265,11 @@ int main(int argc, char* argv[]) {
 
 		xs_and_ys.copy_from_host(host_xs_and_ys.data());
 
+#ifdef __HIP_PLATFORM_AMD__
+		linear_kernel(eval_image<3>, 0, nullptr, n_coords, image.data(), width, height, xs_and_ys.data(), sampled_image.data());
+#else
 		linear_kernel(eval_image<3>, 0, nullptr, n_coords, texture, xs_and_ys.data(), sampled_image.data());
+#endif
 
 		save_image(sampled_image.data(), sampling_width, sampling_height, 3, 3, "reference.jpg");
 
@@ -268,7 +330,11 @@ int main(int argc, char* argv[]) {
 			// Compute reference values at random coordinates
 			{
 				generate_random_uniform<float>(training_stream, rng, batch_size * n_input_dims, training_batch.data());
+#ifdef __HIP_PLATFORM_AMD__
+				linear_kernel(eval_image<n_output_dims>, 0, training_stream, batch_size, image.data(), width, height, training_batch.data(), training_target.data());
+#else
 				linear_kernel(eval_image<n_output_dims>, 0, training_stream, batch_size, texture, training_batch.data(), training_target.data());
+#endif
 			}
 
 			// Training step
