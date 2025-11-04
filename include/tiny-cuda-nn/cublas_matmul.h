@@ -120,8 +120,8 @@ void cublas_gemm(
 	hipblasSetStream(cublas_handle(), stream);
 
 	hipDataType cuda_data_type = std::is_same<T, float>::value ? HIPBLAS_R_32F : HIPBLAS_R_16F;
-	// Experiment: Force FP32 compute type for all operations to test numerical precision
-	hipblasComputeType_t compute_type = HIPBLAS_COMPUTE_32F;
+	// Match data type with compute type to avoid type mismatch issues
+	hipblasComputeType_t compute_type = std::is_same<T, float>::value ? HIPBLAS_COMPUTE_32F : HIPBLAS_COMPUTE_16F;
 	hipblasGemmAlgo_t algo = HIPBLAS_GEMM_DEFAULT;
 	
 #if ENABLE_HIPBLAS_DEBUG_LOGGING
@@ -192,8 +192,8 @@ void cublas_gemm(
 	hipblasSetStream(cublas_handle(), stream);
 
 	hipDataType cuda_data_type = std::is_same<T, float>::value ? HIPBLAS_R_32F : HIPBLAS_R_16F;
-	// Experiment: Force FP32 compute type for all operations to test numerical precision
-	hipblasComputeType_t compute_type = HIPBLAS_COMPUTE_32F;
+	// Match data type with compute type to avoid type mismatch issues
+	hipblasComputeType_t compute_type = std::is_same<T, float>::value ? HIPBLAS_COMPUTE_32F : HIPBLAS_COMPUTE_16F;
 	hipblasGemmAlgo_t algo = HIPBLAS_GEMM_DEFAULT;
 
 #if ENABLE_HIPBLAS_DEBUG_LOGGING
@@ -254,8 +254,8 @@ void cublas_gemm(
 	hipblasSetStream(cublas_handle(), stream);
 
 	hipDataType cuda_data_type = std::is_same<T, float>::value ? HIPBLAS_R_32F : HIPBLAS_R_16F;
-	// Experiment: Force FP32 compute type for all operations to test numerical precision
-	hipblasComputeType_t compute_type = HIPBLAS_COMPUTE_32F;
+	// Match data type with compute type to avoid type mismatch issues
+	hipblasComputeType_t compute_type = std::is_same<T, float>::value ? HIPBLAS_COMPUTE_32F : HIPBLAS_COMPUTE_16F;
 	hipblasGemmAlgo_t algo = HIPBLAS_GEMM_DEFAULT;
 	
 #if ENABLE_HIPBLAS_DEBUG_LOGGING
