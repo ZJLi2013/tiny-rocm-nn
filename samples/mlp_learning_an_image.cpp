@@ -217,7 +217,9 @@ int main(int argc, char* argv[]) {
 		int width, height;
 		GPUMemory<float> image = load_image(argv[1], width, height);   // 256, 256 
 
-		// Second step: create a cuda texture out of this image. It'll be used to generate training data efficiently on the fly
+#ifndef __HIP_PLATFORM_AMD__
+		// Second step: create a cuda texture out of this image (NVIDIA only)
+		// AMD compute GPUs don't support texture objects
 		hipResourceDesc resDesc;
 		memset(&resDesc, 0, sizeof(resDesc));
 		resDesc.resType = hipResourceTypePitch2D;
@@ -237,6 +239,7 @@ int main(int argc, char* argv[]) {
 
 		hipTextureObject_t texture;
 		CUDA_CHECK_THROW(hipCreateTextureObject(&texture, &resDesc, &texDesc, nullptr));
+#endif
 
 		// Third step: sample a reference image to dump to disk. Visual comparison of this reference image and the learned
 		//             function will be eventually possible.
