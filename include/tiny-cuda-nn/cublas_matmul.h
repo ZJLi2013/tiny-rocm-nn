@@ -47,6 +47,35 @@ namespace tcnn {
 			throw std::runtime_error(std::string(FILE_LINE " " #x " failed with error ") + std::to_string(_result)); \
 	} while(0)
 
+// Debug logging control
+#define ENABLE_HIPBLAS_DEBUG_LOGGING 1
+
+#if ENABLE_HIPBLAS_DEBUG_LOGGING
+static int g_gemm_call_counter = 0;
+static int g_fc_multiply_call_counter = 0;
+static int g_fc_multiply_split_k_call_counter = 0;
+
+// Helper function to sample matrix values for debugging
+template <typename T>
+void sample_matrix_values(hipStream_t stream, const T* data, uint32_t m, uint32_t n, const char* name) {
+	const int num_samples = std::min(5, (int)(m * n));
+	std::vector<T> samples(num_samples);
+	
+	// Sample first few elements
+	CUDA_CHECK_THROW(hipMemcpyAsync(samples.data(), data, num_samples * sizeof(T), hipMemcpyDeviceToHost, stream));
+	CUDA_CHECK_THROW(hipStreamSynchronize(stream));
+	
+	printf("  %s[%dx%d] samples: ", name, m, n);
+	for (int i = 0; i < num_samples; ++i) {
+		if (std::is_same<T, __half>::value) {
+			printf("%.4f ", (float)samples[i]);
+		} else {
+			printf("%.4f ", (float)samples[i]);
+		}
+	}
+	printf("\n");
+}
+#endif
 
 inline hipblasHandle_t& cublas_handle() {
 	static hipblasHandle_t handle;
@@ -86,6 +115,16 @@ void cublas_gemm(
 	hipblasComputeType_t compute_type = HIPBLAS_COMPUTE_32F;
 	hipblasGemmAlgo_t algo = HIPBLAS_GEMM_DEFAULT;
 	
+#if ENABLE_HIPBLAS_DEBUG_LOGGING
+	printf("\n[hipBLAS GEMM #%d] RM×RM→RM\n", ++g_gemm_call_counter);
+	printf("  Dimensions: A[%d,%d] × B[%d,%d] → C[%d,%d]\n", m, k, k, n, m, n);
+	printf("  Strides: A=%d, B=%d, C=%d\n", A.stride(), B.stride(), C.stride());
+	printf("  alpha=%.4f, beta=%.4f\n", alpha, beta);
+	printf("  compute_type=%s\n", compute_type == HIPBLAS_COMPUTE_32F ? "FP32" : "FP16");
+	sample_matrix_values(stream, A.data(), m, k, "A");
+	sample_matrix_values(stream, B.data(), k, n, "B");
+#endif
+	
 	// Since all matrices are row-major, we can use the identity (A*B)^T = B^T * A^T
 	// and compute C_cm = B_cm * A_cm, which is equivalent to C_rm = A_rm * B_rm
 	// but with swapped arguments.
@@ -101,6 +140,10 @@ void cublas_gemm(
 		compute_type,
 		algo
 	));
+
+#if ENABLE_HIPBLAS_DEBUG_LOGGING
+	sample_matrix_values(stream, C.data(), m, n, "C_output");
+#endif
 }
 
 template <typename T>
@@ -131,6 +174,16 @@ void cublas_gemm(
 	hipblasComputeType_t compute_type = HIPBLAS_COMPUTE_32F;
 	hipblasGemmAlgo_t algo = HIPBLAS_GEMM_DEFAULT;
 
+#if ENABLE_HIPBLAS_DEBUG_LOGGING
+	printf("\n[hipBLAS GEMM #%d] CM×CM→CM\n", ++g_gemm_call_counter);
+	printf("  Dimensions: A[%d,%d] × B[%d,%d] → C[%d,%d]\n", m, k, k, n, m, n);
+	printf("  Strides: A=%d, B=%d, C=%d\n", A.stride(), B.stride(), C.stride());
+	printf("  alpha=%.4f, beta=%.4f\n", alpha, beta);
+	printf("  compute_type=%s\n", compute_type == HIPBLAS_COMPUTE_32F ? "FP32" : "FP16");
+	sample_matrix_values(stream, A.data(), m, k, "A");
+	sample_matrix_values(stream, B.data(), k, n, "B");
+#endif
+
 	CUBLAS_CHECK_THROW(hipblasGemmEx(
 		cublas_handle(),
 		HIPBLAS_OP_N, HIPBLAS_OP_N,
@@ -143,6 +196,10 @@ void cublas_gemm(
 		compute_type,
 		algo
 	));
+
+#if ENABLE_HIPBLAS_DEBUG_LOGGING
+	sample_matrix_values(stream, C.data(), m, n, "C_output");
+#endif
 }
 
 // Fallback for mixed layouts (less efficient due to potential transposes)
@@ -174,6 +231,17 @@ void cublas_gemm(
 	hipblasComputeType_t compute_type = HIPBLAS_COMPUTE_32F;
 	hipblasGemmAlgo_t algo = HIPBLAS_GEMM_DEFAULT;
 	
+#if ENABLE_HIPBLAS_DEBUG_LOGGING
+	const char* layout_a = LA == RM ? "RM" : "CM";
+	const char* layout_b = LB == RM ? "RM" : "CM";
+	const char* layout_c = LC == RM ? "RM" : "CM";
+	printf("\n[hipBLAS GEMM #%d] MIXED LAYOUT: %s×%s→%s\n", ++g_gemm_call_counter, layout_a, layout_b, layout_c);
+	printf("  Dimensions: A[%d,%d] × B[%d,%d] → C[%d,%d]\n", m, k, k, n, m, n);
+	printf("  Strides: A=%d, B=%d, C=%d\n", A.stride(), B.stride(), C.stride());
+	printf("  alpha=%.4f, beta=%.4f\n", alpha, beta);
+	printf("  compute_type=%s\n", compute_type == HIPBLAS_COMPUTE_32F ? "FP32" : "FP16");
+#endif
+	
 	// For mixed layouts, we need to carefully handle the transpose operations
 	// hipBLAS is column-major, so we interpret RM matrices as transposed CM matrices
 	
@@ -191,6 +259,15 @@ void cublas_gemm(
 		// - CM matrices need HIPBLAS_OP_T to transpose them
 		hipblasOperation_t op_a = LA == RM ? HIPBLAS_OP_N : HIPBLAS_OP_T;
 		hipblasOperation_t op_b = LB == RM ? HIPBLAS_OP_N : HIPBLAS_OP_T;
+		
+#if ENABLE_HIPBLAS_DEBUG_LOGGING
+		printf("  Output is RM: using transposed computation\n");
+		printf("  op_b=%s, op_a=%s (swapped order)\n", 
+			   op_b == HIPBLAS_OP_N ? "N" : "T",
+			   op_a == HIPBLAS_OP_N ? "N" : "T");
+		sample_matrix_values(stream, A.data(), m, k, "A");
+		sample_matrix_values(stream, B.data(), k, n, "B");
+#endif
 		
 		// Swap the operations to match the swapped matrices
 		CUBLAS_CHECK_THROW(hipblasGemmEx(
@@ -210,6 +287,15 @@ void cublas_gemm(
 		hipblasOperation_t op_a = LA == RM ? HIPBLAS_OP_T : HIPBLAS_OP_N;
 		hipblasOperation_t op_b = LB == RM ? HIPBLAS_OP_T : HIPBLAS_OP_N;
 		
+#if ENABLE_HIPBLAS_DEBUG_LOGGING
+		printf("  Output is CM: using standard computation\n");
+		printf("  op_a=%s, op_b=%s\n", 
+			   op_a == HIPBLAS_OP_N ? "N" : "T",
+			   op_b == HIPBLAS_OP_N ? "N" : "T");
+		sample_matrix_values(stream, A.data(), m, k, "A");
+		sample_matrix_values(stream, B.data(), k, n, "B");
+#endif
+		
 		CUBLAS_CHECK_THROW(hipblasGemmEx(
 			cublas_handle(),
 			op_a, op_b,
@@ -223,6 +309,10 @@ void cublas_gemm(
 			algo
 		));
 	}
+
+#if ENABLE_HIPBLAS_DEBUG_LOGGING
+	sample_matrix_values(stream, C.data(), m, n, "C_output");
+#endif
 }
 
 
@@ -232,6 +322,15 @@ void fc_multiply_split_k(hipStream_t stream, const GPUMatrix<T, LA>& A, const GP
 	if (C.data() != D.data()) {
 		throw std::runtime_error("fc_multiply_split_k with cuBLAS requires C and D to be the same matrix.");
 	}
+
+#if ENABLE_HIPBLAS_DEBUG_LOGGING
+	const char* layout_a = LA == RM ? "RM" : "CM";
+	const char* layout_b = LB == RM ? "RM" : "CM";
+	const char* layout_c = LC == RM ? "RM" : "CM";
+	printf("\n[fc_multiply_split_k #%d] %s×%s→%s, split_k=%d, beta=%.4f\n", 
+		   ++g_fc_multiply_split_k_call_counter, layout_a, layout_b, layout_c, split_k_slices, beta);
+	printf("  A[%d,%d], B[%d,%d], C[%d,%d]\n", A.m(), A.n(), B.m(), B.n(), C.m(), C.n());
+#endif
 
 	if (split_k_slices == 1) {
 		cublas_gemm(stream, A, B, C, 1.0f, beta);
@@ -244,11 +343,20 @@ void fc_multiply_split_k(hipStream_t stream, const GPUMatrix<T, LA>& A, const GP
 	}
 	const int k_slice = k / split_k_slices;
 
+#if ENABLE_HIPBLAS_DEBUG_LOGGING
+	printf("  Splitting K=%d into %d slices of size %d\n", k, split_k_slices, k_slice);
+#endif
+
 	for (int i = 0; i < split_k_slices; ++i) {
 		float current_beta = (i == 0) ? beta : 1.0f;
 
 		const GPUMatrix<T, LA> A_slice = A.slice_cols(i * k_slice, k_slice);
 		const GPUMatrix<T, LB> B_slice = B.slice_rows(i * k_slice, k_slice);
+
+#if ENABLE_HIPBLAS_DEBUG_LOGGING
+		printf("  Slice %d/%d: A_slice[%d,%d], B_slice[%d,%d], beta=%.4f\n", 
+			   i+1, split_k_slices, A_slice.m(), A_slice.n(), B_slice.m(), B_slice.n(), current_beta);
+#endif
 
 		cublas_gemm(stream, A_slice, B_slice, C, 1.0f, current_beta);
 	}
@@ -359,11 +467,27 @@ void fc_multiply(
 		throw std::runtime_error("cuBLAS fc_multiply does not support transfer=true. This requires activation backward with forward values.");
 	}
 
+#if ENABLE_HIPBLAS_DEBUG_LOGGING
+	const char* layout_a = LA == RM ? "RM" : "CM";
+	const char* layout_b = LB == RM ? "RM" : "CM";
+	const char* layout_c = LC == RM ? "RM" : "CM";
+	const char* layout_d = LD == RM ? "RM" : "CM";
+	const char* act_name = activation == Activation::None ? "None" : 
+	                       activation == Activation::ReLU ? "ReLU" : "Other";
+	printf("\n[fc_multiply #%d] %s×%s, C:%s, D:%s, act=%s, sum_source=%d\n", 
+		   ++g_fc_multiply_call_counter, layout_a, layout_b, layout_c, layout_d, act_name, sum_source);
+	printf("  A[%d,%d], B[%d,%d], C[%d,%d], D[%d,%d]\n", 
+		   A.m(), A.n(), B.m(), B.n(), C.m(), C.n(), D.m(), D.n());
+#endif
+
 	float beta = sum_source ? 1.0f : 0.0f;
 
 	// Handle C != D case
 	if (C.data() != D.data()) {
 		if (sum_source) {
+#if ENABLE_HIPBLAS_DEBUG_LOGGING
+			printf("  Copying C to D (sum_source=true)\n");
+#endif
 			CUDA_CHECK_THROW(hipMemcpyAsync(D.data(), C.data(), C.n_bytes(), hipMemcpyDeviceToDevice, stream));
 		}
 	}
@@ -373,6 +497,9 @@ void fc_multiply(
 
 	// Apply activation function if needed (not fused, separate kernel)
 	if (activation != Activation::None) {
+#if ENABLE_HIPBLAS_DEBUG_LOGGING
+		printf("  Applying activation: %s\n", act_name);
+#endif
 		const uint32_t num_elements = D.m() * D.n();
 		constexpr uint32_t N_THREADS = 128;
 		const uint32_t n_blocks = (num_elements + N_THREADS - 1) / N_THREADS;
