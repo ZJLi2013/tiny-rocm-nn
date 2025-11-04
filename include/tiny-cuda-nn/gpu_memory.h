@@ -439,9 +439,12 @@ public:
 		// to exhaust all available addresses (even if multiple GPUMemoryArenas are
 		// used simultaneously), while also ensuring that we never exhaust the
 		// reserved address range without running out of physical memory beforehand.
+#ifndef __HIP_PLATFORM_AMD__
+		// AMD GPUs don't fully support virtual memory API - always use fallback
 		if (cuda_supports_virtual_memory() && hipMemAddressReserve(&m_base_address, m_max_size, 0, 0, 0) == hipSuccess) {
 			return;
 		}
+#endif
 
 		// Use regular memory as fallback
 		m_fallback_memory = std::make_shared<GPUMemory<uint8_t>>();
