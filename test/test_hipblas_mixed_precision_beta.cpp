@@ -249,7 +249,12 @@ int main() {
     HIPBLAS_CHECK(hipblasDestroy(handle));
 
     std::cout << "=== Test Complete ===" << std::endl;
-    std::cout << "Conclusion: Use hipblasHgemm for FP16 to avoid mixed precision bugs" << std::endl;
+    std::cout << "Summary:" << std::endl;
+    std::cout << "- Test 1 (FP32 compute + beta=1.0): Demonstrates the mixed precision bug" << std::endl;
+    std::cout << "- Test 2 (FP32 compute + beta=0.0): Shows beta=0 works fine" << std::endl;
+    std::cout << "- Test 3 (FP16 compute + beta=1.0): Tests matching data/compute types" << std::endl;
+    std::cout << std::endl;
+    std::cout << "Conclusion: hipblasGemmEx with mixed precision has beta accumulation issues" << std::endl;
 
     return 0;
 }
