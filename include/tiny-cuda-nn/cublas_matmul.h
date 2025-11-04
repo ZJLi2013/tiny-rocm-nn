@@ -481,9 +481,9 @@ void fc_multiply(
 }
 
 // Overloads for GPUMatrixDynamic
-// Use SFINAE to disambiguate: this overload is for when B is GPUMatrix (not GPUMatrixDynamic)
+// Use SFINAE to disambiguate: this overload is for when B is GPUMatrix (has MatrixLayout template param)
 template <typename T, MatrixLayout LA, MatrixLayout LB, typename TC, typename TD,
-          typename = std::enable_if_t<!std::is_same<MatrixLayout, LB>::value>>
+          typename = std::enable_if_t<std::is_enum<decltype(LB)>::value>>
 void fc_multiply(
 	hipStream_t stream,
 	const GPUMatrix<T, LA>& A,
