@@ -49,6 +49,7 @@ namespace tcnn {
 
 // Debug logging control
 #define ENABLE_HIPBLAS_DEBUG_LOGGING 1
+#define MAX_DEBUG_GEMM_CALLS 100  // Only log first 100 GEMM calls to reduce verbosity
 
 #if ENABLE_HIPBLAS_DEBUG_LOGGING
 static int g_gemm_call_counter = 0;
@@ -116,13 +117,16 @@ void cublas_gemm(
 	hipblasGemmAlgo_t algo = HIPBLAS_GEMM_DEFAULT;
 	
 #if ENABLE_HIPBLAS_DEBUG_LOGGING
-	printf("\n[hipBLAS GEMM #%d] RM×RM→RM\n", ++g_gemm_call_counter);
-	printf("  Dimensions: A[%d,%d] × B[%d,%d] → C[%d,%d]\n", m, k, k, n, m, n);
-	printf("  Strides: A=%d, B=%d, C=%d\n", A.stride(), B.stride(), C.stride());
-	printf("  alpha=%.4f, beta=%.4f\n", alpha, beta);
-	printf("  compute_type=%s\n", compute_type == HIPBLAS_COMPUTE_32F ? "FP32" : "FP16");
-	sample_matrix_values(stream, A.data(), m, k, "A");
-	sample_matrix_values(stream, B.data(), k, n, "B");
+	++g_gemm_call_counter;
+	if (g_gemm_call_counter <= MAX_DEBUG_GEMM_CALLS) {
+		printf("\n[hipBLAS GEMM #%d] RM×RM→RM\n", g_gemm_call_counter);
+		printf("  Dimensions: A[%d,%d] × B[%d,%d] → C[%d,%d]\n", m, k, k, n, m, n);
+		printf("  Strides: A=%d, B=%d, C=%d\n", A.stride(), B.stride(), C.stride());
+		printf("  alpha=%.4f, beta=%.4f\n", alpha, beta);
+		printf("  compute_type=%s\n", compute_type == HIPBLAS_COMPUTE_32F ? "FP32" : "FP16");
+		sample_matrix_values(stream, A.data(), m, k, "A");
+		sample_matrix_values(stream, B.data(), k, n, "B");
+	}
 #endif
 	
 	// Since all matrices are row-major, we can use the identity (A*B)^T = B^T * A^T
@@ -142,7 +146,9 @@ void cublas_gemm(
 	));
 
 #if ENABLE_HIPBLAS_DEBUG_LOGGING
-	sample_matrix_values(stream, C.data(), m, n, "C_output");
+	if (g_gemm_call_counter <= MAX_DEBUG_GEMM_CALLS) {
+		sample_matrix_values(stream, C.data(), m, n, "C_output");
+	}
 #endif
 }
 

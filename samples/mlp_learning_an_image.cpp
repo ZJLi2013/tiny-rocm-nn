@@ -181,7 +181,7 @@ int main(int argc, char* argv[]) {
 			{"optimizer", {
 				{"otype", "Adam"},
 				// {"otype", "Shampoo"},
-				{"learning_rate", 1e-1},  // Experiment: Increased from 1e-2 to test if updates are too small
+				{"learning_rate", 1e-2},  // Reset to original value
 				{"beta1", 0.9f},
 				{"beta2", 0.99f},
 				{"l2_reg", 0.0f},
@@ -279,7 +279,7 @@ int main(int argc, char* argv[]) {
 		// Fourth step: train the model by sampling the above image and optimizing an error metric
 
 		// Various constants for the network and optimization
-		const uint32_t batch_size = 1 << 16;  // Experiment: Reduced from 262144 (1<<18) to 65536 (1<<16)
+		const uint32_t batch_size = 1 << 18;  // Reset to original: 262144
 		const uint32_t n_training_steps = argc >= 4 ? atoi(argv[3]) : 2005;
 		const uint32_t n_input_dims = 2; // 2-D image coordinate
 		const uint32_t n_output_dims = 3; // RGB color
