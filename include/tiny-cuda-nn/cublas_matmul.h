@@ -140,18 +140,38 @@ void cublas_gemm(
 	// Since all matrices are row-major, we can use the identity (A*B)^T = B^T * A^T
 	// and compute C_cm = B_cm * A_cm, which is equivalent to C_rm = A_rm * B_rm
 	// but with swapped arguments.
-	CUBLAS_CHECK_THROW(hipblasGemmEx(
-		cublas_handle(),
-		HIPBLAS_OP_N, HIPBLAS_OP_N,
-		n, m, k,
-		&alpha,
-		B.data(), cuda_data_type, B.stride(),
-		A.data(), cuda_data_type, A.stride(),
-		&beta,
-		C.data(), cuda_data_type, C.stride(),
-		compute_type,
-		algo
-	));
+	
+	// CRITICAL: hipBLAS requires alpha/beta type to match compute_type
+	// Unlike NVIDIA cuBLAS which always uses float*, hipBLAS needs __half* for FP16 compute
+	if (compute_type == HIPBLAS_COMPUTE_16F) {
+		__half alpha_h = __float2half(alpha);
+		__half beta_h = __float2half(beta);
+		CUBLAS_CHECK_THROW(hipblasGemmEx(
+			cublas_handle(),
+			HIPBLAS_OP_N, HIPBLAS_OP_N,
+			n, m, k,
+			&alpha_h,
+			B.data(), cuda_data_type, B.stride(),
+			A.data(), cuda_data_type, A.stride(),
+			&beta_h,
+			C.data(), cuda_data_type, C.stride(),
+			compute_type,
+			algo
+		));
+	} else {
+		CUBLAS_CHECK_THROW(hipblasGemmEx(
+			cublas_handle(),
+			HIPBLAS_OP_N, HIPBLAS_OP_N,
+			n, m, k,
+			&alpha,
+			B.data(), cuda_data_type, B.stride(),
+			A.data(), cuda_data_type, A.stride(),
+			&beta,
+			C.data(), cuda_data_type, C.stride(),
+			compute_type,
+			algo
+		));
+	}
 
 #if ENABLE_HIPBLAS_DEBUG_LOGGING
 	if (should_log_gemm_call(g_gemm_call_counter)) {
@@ -209,18 +229,36 @@ void cublas_gemm(
 	}
 #endif
 
-	CUBLAS_CHECK_THROW(hipblasGemmEx(
-		cublas_handle(),
-		HIPBLAS_OP_N, HIPBLAS_OP_N,
-		m, n, k,
-		&alpha,
-		A.data(), cuda_data_type, A.stride(),
-		B.data(), cuda_data_type, B.stride(),
-		&beta,
-		C.data(), cuda_data_type, C.stride(),
-		compute_type,
-		algo
-	));
+	// CRITICAL: hipBLAS requires alpha/beta type to match compute_type
+	if (compute_type == HIPBLAS_COMPUTE_16F) {
+		__half alpha_h = __float2half(alpha);
+		__half beta_h = __float2half(beta);
+		CUBLAS_CHECK_THROW(hipblasGemmEx(
+			cublas_handle(),
+			HIPBLAS_OP_N, HIPBLAS_OP_N,
+			m, n, k,
+			&alpha_h,
+			A.data(), cuda_data_type, A.stride(),
+			B.data(), cuda_data_type, B.stride(),
+			&beta_h,
+			C.data(), cuda_data_type, C.stride(),
+			compute_type,
+			algo
+		));
+	} else {
+		CUBLAS_CHECK_THROW(hipblasGemmEx(
+			cublas_handle(),
+			HIPBLAS_OP_N, HIPBLAS_OP_N,
+			m, n, k,
+			&alpha,
+			A.data(), cuda_data_type, A.stride(),
+			B.data(), cuda_data_type, B.stride(),
+			&beta,
+			C.data(), cuda_data_type, C.stride(),
+			compute_type,
+			algo
+		));
+	}
 
 #if ENABLE_HIPBLAS_DEBUG_LOGGING
 	if (should_log_gemm_call(g_gemm_call_counter)) {
@@ -311,18 +349,36 @@ void cublas_gemm(
 		
 		// Swap the operations to match the swapped matrices
 		// Use stride() directly like NVIDIA cuBLAS (not calculated leading dims)
-		CUBLAS_CHECK_THROW(hipblasGemmEx(
-			cublas_handle(),
-			op_b, op_a,
-			n, m, k,
-			&alpha,
-			B.data(), cuda_data_type, B.stride(),
-			A.data(), cuda_data_type, A.stride(),
-			&beta,
-			C.data(), cuda_data_type, C.stride(),
-			compute_type,
-			algo
-		));
+		// CRITICAL: hipBLAS requires alpha/beta type to match compute_type
+		if (compute_type == HIPBLAS_COMPUTE_16F) {
+			__half alpha_h = __float2half(alpha);
+			__half beta_h = __float2half(beta);
+			CUBLAS_CHECK_THROW(hipblasGemmEx(
+				cublas_handle(),
+				op_b, op_a,
+				n, m, k,
+				&alpha_h,
+				B.data(), cuda_data_type, B.stride(),
+				A.data(), cuda_data_type, A.stride(),
+				&beta_h,
+				C.data(), cuda_data_type, C.stride(),
+				compute_type,
+				algo
+			));
+		} else {
+			CUBLAS_CHECK_THROW(hipblasGemmEx(
+				cublas_handle(),
+				op_b, op_a,
+				n, m, k,
+				&alpha,
+				B.data(), cuda_data_type, B.stride(),
+				A.data(), cuda_data_type, A.stride(),
+				&beta,
+				C.data(), cuda_data_type, C.stride(),
+				compute_type,
+				algo
+			));
+		}
 	} else {
 		// Output is CM: use standard approach
 		hipblasOperation_t op_a = LA == RM ? HIPBLAS_OP_T : HIPBLAS_OP_N;
@@ -342,18 +398,36 @@ void cublas_gemm(
 #endif
 		
 		// Use stride() directly like NVIDIA cuBLAS (not calculated leading dims)
-		CUBLAS_CHECK_THROW(hipblasGemmEx(
-			cublas_handle(),
-			op_a, op_b,
-			m, n, k,
-			&alpha,
-			A.data(), cuda_data_type, A.stride(),
-			B.data(), cuda_data_type, B.stride(),
-			&beta,
-			C.data(), cuda_data_type, C.stride(),
-			compute_type,
-			algo
-		));
+		// CRITICAL: hipBLAS requires alpha/beta type to match compute_type
+		if (compute_type == HIPBLAS_COMPUTE_16F) {
+			__half alpha_h = __float2half(alpha);
+			__half beta_h = __float2half(beta);
+			CUBLAS_CHECK_THROW(hipblasGemmEx(
+				cublas_handle(),
+				op_a, op_b,
+				m, n, k,
+				&alpha_h,
+				A.data(), cuda_data_type, A.stride(),
+				B.data(), cuda_data_type, B.stride(),
+				&beta_h,
+				C.data(), cuda_data_type, C.stride(),
+				compute_type,
+				algo
+			));
+		} else {
+			CUBLAS_CHECK_THROW(hipblasGemmEx(
+				cublas_handle(),
+				op_a, op_b,
+				m, n, k,
+				&alpha,
+				A.data(), cuda_data_type, A.stride(),
+				B.data(), cuda_data_type, B.stride(),
+				&beta,
+				C.data(), cuda_data_type, C.stride(),
+				compute_type,
+				algo
+			));
+		}
 	}
 
 #if ENABLE_HIPBLAS_DEBUG_LOGGING
