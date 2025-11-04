@@ -319,8 +319,30 @@ TCNN_DEVICE void atomic_add_gmem(float* dst, const tvec<float, N, A>& a) {
 }
 
 #if TCNN_MIN_GPU_ARCH >= 60
-inline TCNN_DEVICE void atomic_add_gmem_h2(half2* addr, half2 in) {
-	// HIP/ROCm uses atomicAdd directly for half2
+#ifdef __HIP_PLATFORM_AMD__
+// AMD ROCm provides unsafeAtomicAdd for __half2 (not atomicAdd)
+inline TCNN_DEVICE void atomic_add_gmem_h2(__half2* addr, __half2 in) {
+	unsafeAtomicAdd(addr, in);
+}
+
+template <uint32_t N, size_t A, typename = std::enable_if_t<N % 2 == 0>>
+TCNN_DEVICE void atomic_add(__half* dst, const tvec<__half, N, A>& a) {
+	TCNN_PRAGMA_UNROLL
+	for (uint32_t i = 0; i < N; i += 2) {
+		unsafeAtomicAdd((__half2*)(dst + i), __half2(a[i], a[i+1]));
+	}
+}
+
+template <uint32_t N, size_t A, typename = std::enable_if_t<N % 2 == 0>>
+TCNN_DEVICE void atomic_add_gmem(__half* dst, const tvec<__half, N, A>& a) {
+	TCNN_PRAGMA_UNROLL
+	for (uint32_t i = 0; i < N; i += 2) {
+		atomic_add_gmem_h2((__half2*)(dst + i), __half2(a[i], a[i+1]));
+	}
+}
+#else
+// NVIDIA CUDA uses atomicAdd for __half2
+inline TCNN_DEVICE void atomic_add_gmem_h2(__half2* addr, __half2 in) {
 	atomicAdd(addr, in);
 }
 
@@ -328,7 +350,6 @@ template <uint32_t N, size_t A, typename = std::enable_if_t<N % 2 == 0>>
 TCNN_DEVICE void atomic_add(__half* dst, const tvec<__half, N, A>& a) {
 	TCNN_PRAGMA_UNROLL
 	for (uint32_t i = 0; i < N; i += 2) {
-		// HIP supports atomicAdd for __half2
 		atomicAdd((__half2*)(dst + i), __half2(a[i], a[i+1]));
 	}
 }
@@ -340,6 +361,7 @@ TCNN_DEVICE void atomic_add_gmem(__half* dst, const tvec<__half, N, A>& a) {
 		atomic_add_gmem_h2((__half2*)(dst + i), __half2(a[i], a[i+1]));
 	}
 }
+#endif
 #endif
 #endif
 
