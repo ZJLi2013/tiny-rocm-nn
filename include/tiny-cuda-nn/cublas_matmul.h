@@ -58,9 +58,9 @@ static int g_fc_multiply_split_k_call_counter = 0;
 
 // Helper to check if we should log this call (sample every Nth call after initial burst)
 inline bool should_log_gemm_call(int call_num) {
-	if (call_num <= 20) return true;  // Log first 20 calls
-	if (call_num >= 190 && call_num <= 210) return true;  // Log around where NaN appears (GEMM #195)
-	if (call_num % 100 == 0) return true;  // Sample every 100th call
+	if (call_num <= 10) return true;  // Log first 20 calls
+	if (call_num >= 190 && call_num <= 200) return true;  // Log around where NaN appears (GEMM #195)
+	// if (call_num % 100 == 0) return true;  // Sample every 100th call
 	return false;
 }
 
@@ -296,12 +296,20 @@ void cublas_gemm(
 		hipblasOperation_t op_a = LA == RM ? HIPBLAS_OP_N : HIPBLAS_OP_T;
 		hipblasOperation_t op_b = LB == RM ? HIPBLAS_OP_N : HIPBLAS_OP_T;
 		
+		// Fix leading dimensions for transposed operations
+		// For op_a=T: A is CM[m,k], transposed becomes [k,m], so lda should be m (not k)
+		// For op_b=T: B is RM[k,n], transposed becomes [n,k], so ldb should be k (not n)
+		int lda = (op_a == HIPBLAS_OP_T) ? m : k;  // Leading dim of A (after considering transpose)
+		int ldb = (op_b == HIPBLAS_OP_T) ? k : n;  // Leading dim of B (after considering transpose)
+		int ldc = n;  // Leading dim of C (RM output, so stride = n)
+		
 #if ENABLE_HIPBLAS_DEBUG_LOGGING
 		if (should_log) {
 			printf("  Output is RM: using transposed computation\n");
 			printf("  op_b=%s, op_a=%s (swapped order)\n", 
 				   op_b == HIPBLAS_OP_N ? "N" : "T",
 				   op_a == HIPBLAS_OP_N ? "N" : "T");
+			printf("  Leading dims: lda=%d, ldb=%d, ldc=%d (corrected for transpose)\n", lda, ldb, ldc);
 			sample_matrix_values(stream, A.data(), m, k, "A");
 			sample_matrix_values(stream, B.data(), k, n, "B");
 		}
@@ -313,10 +321,10 @@ void cublas_gemm(
 			op_b, op_a,
 			n, m, k,
 			&alpha,
-			B.data(), cuda_data_type, B.stride(),
-			A.data(), cuda_data_type, A.stride(),
+			B.data(), cuda_data_type, ldb,
+			A.data(), cuda_data_type, lda,
 			&beta,
-			C.data(), cuda_data_type, C.stride(),
+			C.data(), cuda_data_type, ldc,
 			compute_type,
 			algo
 		));
@@ -325,12 +333,18 @@ void cublas_gemm(
 		hipblasOperation_t op_a = LA == RM ? HIPBLAS_OP_T : HIPBLAS_OP_N;
 		hipblasOperation_t op_b = LB == RM ? HIPBLAS_OP_T : HIPBLAS_OP_N;
 		
+		// Fix leading dimensions for transposed operations
+		int lda = (op_a == HIPBLAS_OP_T) ? k : m;  // Leading dim of A
+		int ldb = (op_b == HIPBLAS_OP_T) ? n : k;  // Leading dim of B
+		int ldc = m;  // Leading dim of C (CM output)
+		
 #if ENABLE_HIPBLAS_DEBUG_LOGGING
 		if (should_log) {
 			printf("  Output is CM: using standard computation\n");
 			printf("  op_a=%s, op_b=%s\n", 
 				   op_a == HIPBLAS_OP_N ? "N" : "T",
 				   op_b == HIPBLAS_OP_N ? "N" : "T");
+			printf("  Leading dims: lda=%d, ldb=%d, ldc=%d (corrected for transpose)\n", lda, ldb, ldc);
 			sample_matrix_values(stream, A.data(), m, k, "A");
 			sample_matrix_values(stream, B.data(), k, n, "B");
 		}
@@ -341,10 +355,10 @@ void cublas_gemm(
 			op_a, op_b,
 			m, n, k,
 			&alpha,
-			A.data(), cuda_data_type, A.stride(),
-			B.data(), cuda_data_type, B.stride(),
+			A.data(), cuda_data_type, lda,
+			B.data(), cuda_data_type, ldb,
 			&beta,
-			C.data(), cuda_data_type, C.stride(),
+			C.data(), cuda_data_type, ldc,
 			compute_type,
 			algo
 		));
