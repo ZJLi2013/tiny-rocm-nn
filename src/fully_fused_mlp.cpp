@@ -745,7 +745,7 @@ std::enable_if_t<std::is_same<__half, T>::value> mlp_fused_forward(
 	__half* first_layer_post_gpu_buffer = nullptr ;
 	__half* first_layer_post_host_buffer = nullptr ; 
 
-	check_shmem_error(hipFuncSetAttribute(reinterpret_cast<const void*>(kernel_mlp_fused<WIDTH), N_ITERS, __half, ACTIVATION, INFERENCE>, hipFuncAttributeMaxDynamicSharedMemorySize, (int)shmem_size));
+	check_shmem_error(hipFuncSetAttribute(reinterpret_cast<const void*>(kernel_mlp_fused<WIDTH, N_ITERS, __half, ACTIVATION, INFERENCE>), hipFuncAttributeMaxDynamicSharedMemorySize, (int)shmem_size));
 	kernel_mlp_fused<WIDTH, N_ITERS, __half, ACTIVATION, INFERENCE><<<blocks, threads, shmem_size, stream>>>(
 		output_activation,
 		input.data(),
