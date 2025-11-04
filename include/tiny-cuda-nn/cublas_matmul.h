@@ -169,6 +169,22 @@ void cublas_gemm(
 }
 
 template <typename T>
+void cublas_gemm(
+	hipStream_t stream,
+	const GPUMatrix<T, CM>& A,
+	const GPUMatrix<T, CM>& B,
+	GPUMatrix<T, CM>& C,
+	float alpha = 1.0f,
+	float beta = 0.0f
+) {
+	if (A.n() != B.m()) {
+		throw std::runtime_error("Matrices A and B can not be multiplied together");
+	}
+
+	const int m = A.m();
+	const int k = A.n();
+	const int n = B.n();
+
 	if (C.m() != m || C.n() != n) {
 		throw std::runtime_error{fmt::format("Matrix C has incorrect size {}x{} != {}x{}", C.m(), C.n(), m, n)};
 	}
@@ -181,13 +197,16 @@ template <typename T>
 	hipblasGemmAlgo_t algo = HIPBLAS_GEMM_DEFAULT;
 
 #if ENABLE_HIPBLAS_DEBUG_LOGGING
-	printf("\n[hipBLAS GEMM #%d] CM×CM→CM\n", ++g_gemm_call_counter);
-	printf("  Dimensions: A[%d,%d] × B[%d,%d] → C[%d,%d]\n", m, k, k, n, m, n);
-	printf("  Strides: A=%d, B=%d, C=%d\n", A.stride(), B.stride(), C.stride());
-	printf("  alpha=%.4f, beta=%.4f\n", alpha, beta);
-	printf("  compute_type=%s\n", compute_type == HIPBLAS_COMPUTE_32F ? "FP32" : "FP16");
-	sample_matrix_values(stream, A.data(), m, k, "A");
-	sample_matrix_values(stream, B.data(), k, n, "B");
+	++g_gemm_call_counter;
+	if (should_log_gemm_call(g_gemm_call_counter)) {
+		printf("\n[hipBLAS GEMM #%d] CM×CM→CM\n", g_gemm_call_counter);
+		printf("  Dimensions: A[%d,%d] × B[%d,%d] → C[%d,%d]\n", m, k, k, n, m, n);
+		printf("  Strides: A=%d, B=%d, C=%d\n", A.stride(), B.stride(), C.stride());
+		printf("  alpha=%.4f, beta=%.4f\n", alpha, beta);
+		printf("  compute_type=%s\n", compute_type == HIPBLAS_COMPUTE_32F ? "FP32" : "FP16");
+		sample_matrix_values(stream, A.data(), m, k, "A");
+		sample_matrix_values(stream, B.data(), k, n, "B");
+	}
 #endif
 
 	CUBLAS_CHECK_THROW(hipblasGemmEx(
@@ -204,7 +223,9 @@ template <typename T>
 	));
 
 #if ENABLE_HIPBLAS_DEBUG_LOGGING
-	sample_matrix_values(stream, C.data(), m, n, "C_output");
+	if (should_log_gemm_call(g_gemm_call_counter)) {
+		sample_matrix_values(stream, C.data(), m, n, "C_output");
+	}
 #endif
 }
 
