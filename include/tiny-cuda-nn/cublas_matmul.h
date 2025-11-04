@@ -169,22 +169,6 @@ void cublas_gemm(
 }
 
 template <typename T>
-void cublas_gemm(
-	hipStream_t stream,
-	const GPUMatrix<T, CM>& A,
-	const GPUMatrix<T, CM>& B,
-	GPUMatrix<T, CM>& C,
-	float alpha = 1.0f,
-	float beta = 0.0f
-) {
-	if (A.n() != B.m()) {
-		throw std::runtime_error("Matrices A and B can not be multiplied together");
-	}
-
-	const int m = A.m();
-	const int k = A.n();
-	const int n = B.n();
-
 	if (C.m() != m || C.n() != n) {
 		throw std::runtime_error{fmt::format("Matrix C has incorrect size {}x{} != {}x{}", C.m(), C.n(), m, n)};
 	}
@@ -254,14 +238,23 @@ void cublas_gemm(
 	hipblasGemmAlgo_t algo = HIPBLAS_GEMM_DEFAULT;
 	
 #if ENABLE_HIPBLAS_DEBUG_LOGGING
-	const char* layout_a = LA == RM ? "RM" : "CM";
-	const char* layout_b = LB == RM ? "RM" : "CM";
-	const char* layout_c = LC == RM ? "RM" : "CM";
-	printf("\n[hipBLAS GEMM #%d] MIXED LAYOUT: %s×%s→%s\n", ++g_gemm_call_counter, layout_a, layout_b, layout_c);
-	printf("  Dimensions: A[%d,%d] × B[%d,%d] → C[%d,%d]\n", m, k, k, n, m, n);
-	printf("  Strides: A=%d, B=%d, C=%d\n", A.stride(), B.stride(), C.stride());
-	printf("  alpha=%.4f, beta=%.4f\n", alpha, beta);
-	printf("  compute_type=%s\n", compute_type == HIPBLAS_COMPUTE_32F ? "FP32" : "FP16");
+	++g_gemm_call_counter;
+	bool should_log = should_log_gemm_call(g_gemm_call_counter);
+	if (should_log) {
+		const char* layout_a = LA == RM ? "RM" : "CM";
+		const char* layout_b = LB == RM ? "RM" : "CM";
+		const char* layout_c = LC == RM ? "RM" : "CM";
+		printf("\n[hipBLAS GEMM #%d] MIXED LAYOUT: %s×%s→%s\n", g_gemm_call_counter, layout_a, layout_b, layout_c);
+		printf("  Dimensions: A[%d,%d] × B[%d,%d] → C[%d,%d]\n", m, k, k, n, m, n);
+		printf("  Strides: A=%d, B=%d, C=%d\n", A.stride(), B.stride(), C.stride());
+		printf("  alpha=%.4f, beta=%.4f\n", alpha, beta);
+		printf("  compute_type=%s\n", compute_type == HIPBLAS_COMPUTE_32F ? "FP32" : "FP16");
+		
+		// Sample C_before if beta != 0 (accumulation mode)
+		if (beta != 0.0f) {
+			sample_matrix_values(stream, C.data(), m, n, "C_before");
+		}
+	}
 #endif
 	
 	// For mixed layouts, we need to carefully handle the transpose operations
@@ -283,12 +276,14 @@ void cublas_gemm(
 		hipblasOperation_t op_b = LB == RM ? HIPBLAS_OP_N : HIPBLAS_OP_T;
 		
 #if ENABLE_HIPBLAS_DEBUG_LOGGING
-		printf("  Output is RM: using transposed computation\n");
-		printf("  op_b=%s, op_a=%s (swapped order)\n", 
-			   op_b == HIPBLAS_OP_N ? "N" : "T",
-			   op_a == HIPBLAS_OP_N ? "N" : "T");
-		sample_matrix_values(stream, A.data(), m, k, "A");
-		sample_matrix_values(stream, B.data(), k, n, "B");
+		if (should_log) {
+			printf("  Output is RM: using transposed computation\n");
+			printf("  op_b=%s, op_a=%s (swapped order)\n", 
+				   op_b == HIPBLAS_OP_N ? "N" : "T",
+				   op_a == HIPBLAS_OP_N ? "N" : "T");
+			sample_matrix_values(stream, A.data(), m, k, "A");
+			sample_matrix_values(stream, B.data(), k, n, "B");
+		}
 #endif
 		
 		// Swap the operations to match the swapped matrices
@@ -310,12 +305,14 @@ void cublas_gemm(
 		hipblasOperation_t op_b = LB == RM ? HIPBLAS_OP_T : HIPBLAS_OP_N;
 		
 #if ENABLE_HIPBLAS_DEBUG_LOGGING
-		printf("  Output is CM: using standard computation\n");
-		printf("  op_a=%s, op_b=%s\n", 
-			   op_a == HIPBLAS_OP_N ? "N" : "T",
-			   op_b == HIPBLAS_OP_N ? "N" : "T");
-		sample_matrix_values(stream, A.data(), m, k, "A");
-		sample_matrix_values(stream, B.data(), k, n, "B");
+		if (should_log) {
+			printf("  Output is CM: using standard computation\n");
+			printf("  op_a=%s, op_b=%s\n", 
+				   op_a == HIPBLAS_OP_N ? "N" : "T",
+				   op_b == HIPBLAS_OP_N ? "N" : "T");
+			sample_matrix_values(stream, A.data(), m, k, "A");
+			sample_matrix_values(stream, B.data(), k, n, "B");
+		}
 #endif
 		
 		CUBLAS_CHECK_THROW(hipblasGemmEx(
@@ -333,7 +330,18 @@ void cublas_gemm(
 	}
 
 #if ENABLE_HIPBLAS_DEBUG_LOGGING
-	sample_matrix_values(stream, C.data(), m, n, "C_output");
+	if (should_log) {
+		sample_matrix_values(stream, C.data(), m, n, "C_output");
+		// Check for NaN in output
+		std::vector<T> check_sample(1);
+		CUDA_CHECK_THROW(hipMemcpyAsync(check_sample.data(), C.data(), sizeof(T), hipMemcpyDeviceToHost, stream));
+		CUDA_CHECK_THROW(hipStreamSynchronize(stream));
+		if (std::isnan((float)check_sample[0])) {
+			printf("  🔴 CRITICAL: NaN detected in MIXED LAYOUT output at GEMM #%d!\n", g_gemm_call_counter);
+			printf("  Operation: %s×%s→%s with beta=%.4f\n", 
+				   LA == RM ? "RM" : "CM", LB == RM ? "RM" : "CM", LC == RM ? "RM" : "CM", beta);
+		}
+	}
 #endif
 }
 
