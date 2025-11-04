@@ -120,8 +120,10 @@ void cublas_gemm(
 	hipblasSetStream(cublas_handle(), stream);
 
 	hipDataType cuda_data_type = std::is_same<T, float>::value ? HIPBLAS_R_32F : HIPBLAS_R_16F;
-	// Match data type with compute type to avoid type mismatch issues
-	hipblasComputeType_t compute_type = std::is_same<T, float>::value ? HIPBLAS_COMPUTE_32F : HIPBLAS_COMPUTE_16F;
+	// CRITICAL: Always use FP32 compute for numerical stability, even with FP16 data
+	// This matches NVIDIA's CUBLAS_COMPUTE_32F_FAST_16F behavior
+	// FP16 compute causes accumulation overflow and NaN
+	hipblasComputeType_t compute_type = HIPBLAS_COMPUTE_32F;
 	hipblasGemmAlgo_t algo = HIPBLAS_GEMM_DEFAULT;
 	
 #if ENABLE_HIPBLAS_DEBUG_LOGGING
@@ -131,7 +133,8 @@ void cublas_gemm(
 		printf("  Dimensions: A[%d,%d] × B[%d,%d] → C[%d,%d]\n", m, k, k, n, m, n);
 		printf("  Strides: A=%d, B=%d, C=%d\n", A.stride(), B.stride(), C.stride());
 		printf("  alpha=%.4f, beta=%.4f\n", alpha, beta);
-		printf("  compute_type=%s\n", compute_type == HIPBLAS_COMPUTE_32F ? "FP32" : "FP16");
+		printf("  data_type=%s, compute_type=FP32\n", 
+			   cuda_data_type == HIPBLAS_R_32F ? "FP32" : "FP16");
 		sample_matrix_values(stream, A.data(), m, k, "A");
 		sample_matrix_values(stream, B.data(), k, n, "B");
 	}
@@ -141,37 +144,19 @@ void cublas_gemm(
 	// and compute C_cm = B_cm * A_cm, which is equivalent to C_rm = A_rm * B_rm
 	// but with swapped arguments.
 	
-	// CRITICAL: hipBLAS requires alpha/beta type to match compute_type
-	// Unlike NVIDIA cuBLAS which always uses float*, hipBLAS needs __half* for FP16 compute
-	if (compute_type == HIPBLAS_COMPUTE_16F) {
-		__half alpha_h = __float2half(alpha);
-		__half beta_h = __float2half(beta);
-		CUBLAS_CHECK_THROW(hipblasGemmEx(
-			cublas_handle(),
-			HIPBLAS_OP_N, HIPBLAS_OP_N,
-			n, m, k,
-			&alpha_h,
-			B.data(), cuda_data_type, B.stride(),
-			A.data(), cuda_data_type, A.stride(),
-			&beta_h,
-			C.data(), cuda_data_type, C.stride(),
-			compute_type,
-			algo
-		));
-	} else {
-		CUBLAS_CHECK_THROW(hipblasGemmEx(
-			cublas_handle(),
-			HIPBLAS_OP_N, HIPBLAS_OP_N,
-			n, m, k,
-			&alpha,
-			B.data(), cuda_data_type, B.stride(),
-			A.data(), cuda_data_type, A.stride(),
-			&beta,
-			C.data(), cuda_data_type, C.stride(),
-			compute_type,
-			algo
-		));
-	}
+	// With FP32 compute, always use float* for alpha/beta
+	CUBLAS_CHECK_THROW(hipblasGemmEx(
+		cublas_handle(),
+		HIPBLAS_OP_N, HIPBLAS_OP_N,
+		n, m, k,
+		&alpha,
+		B.data(), cuda_data_type, B.stride(),
+		A.data(), cuda_data_type, A.stride(),
+		&beta,
+		C.data(), cuda_data_type, C.stride(),
+		compute_type,
+		algo
+	));
 
 #if ENABLE_HIPBLAS_DEBUG_LOGGING
 	if (should_log_gemm_call(g_gemm_call_counter)) {
@@ -212,8 +197,8 @@ void cublas_gemm(
 	hipblasSetStream(cublas_handle(), stream);
 
 	hipDataType cuda_data_type = std::is_same<T, float>::value ? HIPBLAS_R_32F : HIPBLAS_R_16F;
-	// Match data type with compute type to avoid type mismatch issues
-	hipblasComputeType_t compute_type = std::is_same<T, float>::value ? HIPBLAS_COMPUTE_32F : HIPBLAS_COMPUTE_16F;
+	// CRITICAL: Always use FP32 compute for numerical stability
+	hipblasComputeType_t compute_type = HIPBLAS_COMPUTE_32F;
 	hipblasGemmAlgo_t algo = HIPBLAS_GEMM_DEFAULT;
 
 #if ENABLE_HIPBLAS_DEBUG_LOGGING
@@ -223,42 +208,26 @@ void cublas_gemm(
 		printf("  Dimensions: A[%d,%d] × B[%d,%d] → C[%d,%d]\n", m, k, k, n, m, n);
 		printf("  Strides: A=%d, B=%d, C=%d\n", A.stride(), B.stride(), C.stride());
 		printf("  alpha=%.4f, beta=%.4f\n", alpha, beta);
-		printf("  compute_type=%s\n", compute_type == HIPBLAS_COMPUTE_32F ? "FP32" : "FP16");
+		printf("  data_type=%s, compute_type=FP32\n",
+			   cuda_data_type == HIPBLAS_R_32F ? "FP32" : "FP16");
 		sample_matrix_values(stream, A.data(), m, k, "A");
 		sample_matrix_values(stream, B.data(), k, n, "B");
 	}
 #endif
 
-	// CRITICAL: hipBLAS requires alpha/beta type to match compute_type
-	if (compute_type == HIPBLAS_COMPUTE_16F) {
-		__half alpha_h = __float2half(alpha);
-		__half beta_h = __float2half(beta);
-		CUBLAS_CHECK_THROW(hipblasGemmEx(
-			cublas_handle(),
-			HIPBLAS_OP_N, HIPBLAS_OP_N,
-			m, n, k,
-			&alpha_h,
-			A.data(), cuda_data_type, A.stride(),
-			B.data(), cuda_data_type, B.stride(),
-			&beta_h,
-			C.data(), cuda_data_type, C.stride(),
-			compute_type,
-			algo
-		));
-	} else {
-		CUBLAS_CHECK_THROW(hipblasGemmEx(
-			cublas_handle(),
-			HIPBLAS_OP_N, HIPBLAS_OP_N,
-			m, n, k,
-			&alpha,
-			A.data(), cuda_data_type, A.stride(),
-			B.data(), cuda_data_type, B.stride(),
-			&beta,
-			C.data(), cuda_data_type, C.stride(),
-			compute_type,
-			algo
-		));
-	}
+	// With FP32 compute, always use float* for alpha/beta
+	CUBLAS_CHECK_THROW(hipblasGemmEx(
+		cublas_handle(),
+		HIPBLAS_OP_N, HIPBLAS_OP_N,
+		m, n, k,
+		&alpha,
+		A.data(), cuda_data_type, A.stride(),
+		B.data(), cuda_data_type, B.stride(),
+		&beta,
+		C.data(), cuda_data_type, C.stride(),
+		compute_type,
+		algo
+	));
 
 #if ENABLE_HIPBLAS_DEBUG_LOGGING
 	if (should_log_gemm_call(g_gemm_call_counter)) {
@@ -292,8 +261,8 @@ void cublas_gemm(
 	hipblasSetStream(cublas_handle(), stream);
 
 	hipDataType cuda_data_type = std::is_same<T, float>::value ? HIPBLAS_R_32F : HIPBLAS_R_16F;
-	// Match data type with compute type to avoid type mismatch issues
-	hipblasComputeType_t compute_type = std::is_same<T, float>::value ? HIPBLAS_COMPUTE_32F : HIPBLAS_COMPUTE_16F;
+	// CRITICAL: Always use FP32 compute for numerical stability
+	hipblasComputeType_t compute_type = HIPBLAS_COMPUTE_32F;
 	hipblasGemmAlgo_t algo = HIPBLAS_GEMM_DEFAULT;
 	
 #if ENABLE_HIPBLAS_DEBUG_LOGGING
@@ -307,7 +276,8 @@ void cublas_gemm(
 		printf("  Dimensions: A[%d,%d] × B[%d,%d] → C[%d,%d]\n", m, k, k, n, m, n);
 		printf("  Strides: A=%d, B=%d, C=%d\n", A.stride(), B.stride(), C.stride());
 		printf("  alpha=%.4f, beta=%.4f\n", alpha, beta);
-		printf("  compute_type=%s\n", compute_type == HIPBLAS_COMPUTE_32F ? "FP32" : "FP16");
+		printf("  data_type=%s, compute_type=FP32\n",
+			   cuda_data_type == HIPBLAS_R_32F ? "FP32" : "FP16");
 		
 		// Sample C_before if beta != 0 (accumulation mode)
 		if (beta != 0.0f) {
@@ -348,37 +318,19 @@ void cublas_gemm(
 #endif
 		
 		// Swap the operations to match the swapped matrices
-		// Use stride() directly like NVIDIA cuBLAS (not calculated leading dims)
-		// CRITICAL: hipBLAS requires alpha/beta type to match compute_type
-		if (compute_type == HIPBLAS_COMPUTE_16F) {
-			__half alpha_h = __float2half(alpha);
-			__half beta_h = __float2half(beta);
-			CUBLAS_CHECK_THROW(hipblasGemmEx(
-				cublas_handle(),
-				op_b, op_a,
-				n, m, k,
-				&alpha_h,
-				B.data(), cuda_data_type, B.stride(),
-				A.data(), cuda_data_type, A.stride(),
-				&beta_h,
-				C.data(), cuda_data_type, C.stride(),
-				compute_type,
-				algo
-			));
-		} else {
-			CUBLAS_CHECK_THROW(hipblasGemmEx(
-				cublas_handle(),
-				op_b, op_a,
-				n, m, k,
-				&alpha,
-				B.data(), cuda_data_type, B.stride(),
-				A.data(), cuda_data_type, A.stride(),
-				&beta,
-				C.data(), cuda_data_type, C.stride(),
-				compute_type,
-				algo
-			));
-		}
+		// With FP32 compute, always use float* for alpha/beta
+		CUBLAS_CHECK_THROW(hipblasGemmEx(
+			cublas_handle(),
+			op_b, op_a,
+			n, m, k,
+			&alpha,
+			B.data(), cuda_data_type, B.stride(),
+			A.data(), cuda_data_type, A.stride(),
+			&beta,
+			C.data(), cuda_data_type, C.stride(),
+			compute_type,
+			algo
+		));
 	} else {
 		// Output is CM: use standard approach
 		hipblasOperation_t op_a = LA == RM ? HIPBLAS_OP_T : HIPBLAS_OP_N;
@@ -397,37 +349,19 @@ void cublas_gemm(
 		}
 #endif
 		
-		// Use stride() directly like NVIDIA cuBLAS (not calculated leading dims)
-		// CRITICAL: hipBLAS requires alpha/beta type to match compute_type
-		if (compute_type == HIPBLAS_COMPUTE_16F) {
-			__half alpha_h = __float2half(alpha);
-			__half beta_h = __float2half(beta);
-			CUBLAS_CHECK_THROW(hipblasGemmEx(
-				cublas_handle(),
-				op_a, op_b,
-				m, n, k,
-				&alpha_h,
-				A.data(), cuda_data_type, A.stride(),
-				B.data(), cuda_data_type, B.stride(),
-				&beta_h,
-				C.data(), cuda_data_type, C.stride(),
-				compute_type,
-				algo
-			));
-		} else {
-			CUBLAS_CHECK_THROW(hipblasGemmEx(
-				cublas_handle(),
-				op_a, op_b,
-				m, n, k,
-				&alpha,
-				A.data(), cuda_data_type, A.stride(),
-				B.data(), cuda_data_type, B.stride(),
-				&beta,
-				C.data(), cuda_data_type, C.stride(),
-				compute_type,
-				algo
-			));
-		}
+		// With FP32 compute, always use float* for alpha/beta
+		CUBLAS_CHECK_THROW(hipblasGemmEx(
+			cublas_handle(),
+			op_a, op_b,
+			m, n, k,
+			&alpha,
+			A.data(), cuda_data_type, A.stride(),
+			B.data(), cuda_data_type, B.stride(),
+			&beta,
+			C.data(), cuda_data_type, C.stride(),
+			compute_type,
+			algo
+		));
 	}
 
 #if ENABLE_HIPBLAS_DEBUG_LOGGING
