@@ -115,8 +115,10 @@ set(TCNN_SOURCES
 ###############################################################################
 
 # Define TCNN_MIN_GPU_ARCH for ROCm (use a value that enables all features)
-# For AMD GPUs, we use 70 which enables FullyFusedMLP and half precision
-list(APPEND TCNN_DEFINITIONS -DTCNN_MIN_GPU_ARCH=70)
+# For AMD GPUs, we use 75 to enable FullyFusedMLP compilation (architecture check is bypassed in code)
+# Note: AMD GPUs use different architecture numbering (gfx908, gfx90a, etc.), but we use
+# NVIDIA's numbering for compatibility with preprocessor checks in the codebase
+list(APPEND TCNN_DEFINITIONS -DTCNN_MIN_GPU_ARCH=75)
 
 add_library(tiny-rocm-nn STATIC ${TCNN_SOURCES})
 target_compile_definitions(tiny-rocm-nn PUBLIC ${TCNN_DEFINITIONS})
