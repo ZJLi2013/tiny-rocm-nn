@@ -327,7 +327,7 @@ int main(int argc, char* argv[]) {
 
 		for (uint32_t i = 0; i < n_training_steps; ++i) {
 			// Print loss at specific steps: 0, 100, 1000, 2000
-			bool print_loss = (i == 0 || i == 100 || i == 1000 || i == 2000 || i % interval == 0);
+			bool print_loss = (i == 0 || i == 100 || i == 1000 || i == 2000 || i == 3000 || i == 4000 || i == 5000 ||  i % interval == 0);
 			bool visualize_learned_func = argc < 5 && (i == 0 || i == 100 || i == 1000 || i == 2000);
 
 			// Compute reference values at random coordinates

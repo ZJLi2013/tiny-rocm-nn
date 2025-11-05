@@ -126,6 +126,10 @@ __device__ void threadblock_layer(Activation activation, __half* __restrict__ ac
 		} else {
 			warp_activation<__half>(activation, result_frag[l], result_frag[l]);
 		}
+		
+		// v21: Add sync after each iteration (8 times total, not 72)
+		// This provides numerical stability without excessive overhead
+		__syncthreads();
 	}
 
 	__syncthreads();
