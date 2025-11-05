@@ -127,7 +127,9 @@ __device__ void threadblock_layer(Activation activation, __half* __restrict__ ac
 		if (BACKWARD) {
 			// Load the temporary forward matrix for the relu transfer
 			load_matrix_sync(act_frag, activation_aux + weights_col + l * 16 * WIDTH, WIDTH);
-			warp_activation_backward<float>(activation, result_frag[l], act_frag, result_frag[l]);
+			// Note: Don't specify template parameter - let compiler deduce types
+			// result_frag is float, act_frag is __half - template will handle the conversion
+			warp_activation_backward(activation, result_frag[l], act_frag, result_frag[l]);
 		} else {
 			warp_activation<float>(activation, result_frag[l], result_frag[l]);
 		}
@@ -254,7 +256,8 @@ __global__ void kernel_mlp_fused_backward(
 			load_matrix_sync(forward_frag, forward + layer_stride * n_hidden_matmuls + weights_col + (elem_idx + l * 16) * WIDTH, WIDTH);
 
 			// v27: Activation backward in FP32 precision
-			warp_activation_backward<float>(ACTIVATION, result_frag[l], forward_frag, result_frag[l]);
+			// Note: Don't specify template parameter - let compiler deduce types
+			warp_activation_backward(ACTIVATION, result_frag[l], forward_frag, result_frag[l]);
 		}
 
 		__syncthreads();
