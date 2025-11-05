@@ -1,4 +1,5 @@
 #include <hip/hip_runtime.h>
+#include <hip/hip_fp16.h>
 #include <rocwmma/rocwmma.hpp>
 #include <iostream>
 #include <vector>
@@ -37,7 +38,7 @@ __global__ void test_rocwmma_matmul_kernel(
 __global__ void test_rocwmma_matmul_fp32_accum_kernel(
     const __half* A,
     const __half* B,
-    __half* C
+    float* C  // FP32 output for FP32 accumulator
 ) {
     using namespace rocwmma;
     
@@ -171,33 +172,58 @@ int main() {
     
     // Test 2: FP32 accumulator
     std::cout << "\n--- Test 2: FP32 Accumulator ---\n";
-    hipMemset(d_C, 0, size * sizeof(__half));
     
-    hipLaunchKernelGGL(test_rocwmma_matmul_fp32_accum_kernel, grid, block, 0, 0, d_A, d_B, d_C);
+    // Allocate FP32 device memory for FP32 accumulator output
+    float *d_C_fp32;
+    hipMalloc(&d_C_fp32, size * sizeof(float));
+    hipMemset(d_C_fp32, 0, size * sizeof(float));
+    
+    hipLaunchKernelGGL(test_rocwmma_matmul_fp32_accum_kernel, grid, block, 0, 0, d_A, d_B, d_C_fp32);
     hipDeviceSynchronize();
     
     err = hipGetLastError();
     if (err != hipSuccess) {
         std::cerr << "Kernel launch failed: " << hipGetErrorString(err) << std::endl;
+        hipFree(d_C_fp32);
         return 1;
     }
     
-    hipMemcpy(h_C.data(), d_C, size * sizeof(__half), hipMemcpyDeviceToHost);
+    // Copy FP32 result back and convert to FP16 for comparison
+    std::vector<float> h_C_fp32(size);
+    hipMemcpy(h_C_fp32.data(), d_C_fp32, size * sizeof(float), hipMemcpyDeviceToHost);
     
-    if (has_nan(h_C)) {
-        std::cout << "ERROR: NaN detected in output!\n";
-        print_matrix("Output C (with NaN)", h_C, 4, 4);
+    // Check for NaN in FP32 output
+    bool has_nan_fp32 = false;
+    for (int i = 0; i < size; i++) {
+        if (std::isnan(h_C_fp32[i])) {
+            has_nan_fp32 = true;
+            break;
+        }
+    }
+    
+    if (has_nan_fp32) {
+        std::cout << "ERROR: NaN detected in FP32 output!\n";
         return 1;
     }
     
     max_error = 0.0f;
     for (int i = 0; i < size; i++) {
-        float error = std::abs(__half2float(h_C[i]) - h_C_ref[i]);
+        float error = std::abs(h_C_fp32[i] - h_C_ref[i]);
         max_error = std::max(max_error, error);
     }
     
     std::cout << "Max error (FP32 accum): " << max_error << "\n";
-    print_matrix("GPU Output C (first 4x4)", h_C, 4, 4);
+    std::cout << "GPU Output C (first 4x4, FP32):\n";
+    for (int i = 0; i < 4; i++) {
+        for (int j = 0; j < 4; j++) {
+            std::cout << std::setw(8) << std::fixed << std::setprecision(3) 
+                      << h_C_fp32[i * 16 + j] << " ";
+        }
+        std::cout << "\n";
+    }
+    std::cout << "\n";
+    
+    hipFree(d_C_fp32);
     
     // Cleanup
     hipFree(d_A);
