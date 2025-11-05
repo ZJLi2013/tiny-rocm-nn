@@ -95,6 +95,12 @@ __device__ void threadblock_layer(Activation activation, __half* __restrict__ ac
 
 	__syncthreads();
 
+	// DEBUG: Print thread configuration (only once from first thread of first block)
+	if (!BACKWARD && li == 0 && wi == 0 && blockIdx.x == 0) {
+		printf("[rocWMMA DEBUG] threadblock_layer: blockDim=(%u,%u,%u), WAVE_SIZE=%u, WIDTH=%u, N_ITERS=%d\n",
+			blockDim.x, blockDim.y, blockDim.z, WAVE_SIZE, WIDTH, N_ITERS);
+	}
+
 	// Load N_BLOCKS chunks of weights from global memory into registers.
 	TCNN_PRAGMA_UNROLL
 	for (uint32_t i = 0; i < N_BLOCKS; ++i) {
@@ -104,6 +110,20 @@ __device__ void threadblock_layer(Activation activation, __half* __restrict__ ac
 			load_matrix_sync(weights_frag[i], weights_this_layer + 16 * i * WIDTH + weights_col, WIDTH);
 		} else {
 			load_matrix_sync(weights_frag[i], weights_this_layer + 16 * i + weights_col * WIDTH, WIDTH);
+		}
+		
+		// DEBUG: Check for NaN in weights (first block only)
+		if (!BACKWARD && i == 0 && li == 0 && wi == 0 && blockIdx.x == 0) {
+			bool has_nan = false;
+			for (int j = 0; j < weights_frag[i].num_elements; ++j) {
+				if (isnan(float(weights_frag[i].x[j]))) {
+					has_nan = true;
+					break;
+				}
+			}
+			if (has_nan) {
+				printf("🔴 [rocWMMA] NaN detected in weights_frag[%u]\n", i);
+			}
 		}
 	}
 
@@ -115,7 +135,42 @@ __device__ void threadblock_layer(Activation activation, __half* __restrict__ ac
 		for (uint32_t i = 0; i < N_BLOCKS; ++i) {
 			// Load a chunk of intermediate activations from shared memory and multiply with chunk of weights
 			load_matrix_sync(act_frag, act_shmem + 16 * i + (16 * l) * (WIDTH + SKEW), WIDTH + SKEW);
+			
+			// DEBUG: Check activations before MMA (first iteration, first block only)
+			if (!BACKWARD && l == 0 && i == 0 && li == 0 && wi == 0 && blockIdx.x == 0) {
+				bool has_nan = false;
+				float sum = 0.0f;
+				int n_samples = min(5, act_frag.num_elements);
+				printf("[rocWMMA] act_frag before MMA samples: ");
+				for (int j = 0; j < n_samples; ++j) {
+					printf("%.4f ", float(act_frag.x[j]));
+					if (isnan(float(act_frag.x[j]))) has_nan = true;
+					sum += float(act_frag.x[j]);
+				}
+				printf("(sum=%.4f)\n", sum);
+				if (has_nan) {
+					printf("🔴 [rocWMMA] NaN detected in act_frag before MMA\n");
+				}
+			}
+			
 			mma_sync(result_frag[l], act_frag, weights_frag[i], result_frag[l]);
+			
+			// DEBUG: Check result after MMA (first iteration, first block only)
+			if (!BACKWARD && l == 0 && i == 0 && li == 0 && wi == 0 && blockIdx.x == 0) {
+				bool has_nan = false;
+				float sum = 0.0f;
+				int n_samples = min(5, result_frag[l].num_elements);
+				printf("[rocWMMA] result_frag after MMA samples: ");
+				for (int j = 0; j < n_samples; ++j) {
+					printf("%.4f ", float(result_frag[l].x[j]));
+					if (isnan(float(result_frag[l].x[j]))) has_nan = true;
+					sum += float(result_frag[l].x[j]);
+				}
+				printf("(sum=%.4f)\n", sum);
+				if (has_nan) {
+					printf("🔴 [rocWMMA] NaN detected in result_frag after MMA\n");
+				}
+			}
 		}
 
 		// Activation
@@ -125,6 +180,23 @@ __device__ void threadblock_layer(Activation activation, __half* __restrict__ ac
 			warp_activation_backward<__half>(activation, result_frag[l], act_frag, result_frag[l]);
 		} else {
 			warp_activation<__half>(activation, result_frag[l], result_frag[l]);
+		}
+		
+		// DEBUG: Check result after activation (first iteration, first block only)
+		if (!BACKWARD && l == 0 && li == 0 && wi == 0 && blockIdx.x == 0) {
+			bool has_nan = false;
+			float sum = 0.0f;
+			int n_samples = min(5, result_frag[l].num_elements);
+			printf("[rocWMMA] result_frag after activation samples: ");
+			for (int j = 0; j < n_samples; ++j) {
+				printf("%.4f ", float(result_frag[l].x[j]));
+				if (isnan(float(result_frag[l].x[j]))) has_nan = true;
+				sum += float(result_frag[l].x[j]);
+			}
+			printf("(sum=%.4f)\n", sum);
+			if (has_nan) {
+				printf("🔴 [rocWMMA] NaN detected in result_frag after activation\n");
+			}
 		}
 	}
 
