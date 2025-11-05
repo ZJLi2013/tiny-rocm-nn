@@ -39,6 +39,9 @@
 
 namespace tcnn {
 
+// ROCm: AMD GPU wave size (64 threads per wave, vs NVIDIA's 32 threads per warp)
+constexpr uint32_t WAVE_SIZE = 64;
+
 void check_shmem_error(hipError_t error) {
 	if (error != hipSuccess) {
 		throw std::runtime_error{"FullyFusedMLP: insufficient shared memory available on the GPU. Reduce `n_neurons` to fit available shared memory."};
@@ -60,7 +63,7 @@ __device__ void sh2gmem(__half* device_mem, const __half* __restrict__ shmem, in
 template <int WIDTH, int N_ITERS, typename OUT_T, bool BACKWARD=false>
 __device__ void threadblock_layer(Activation activation, __half* __restrict__ act_shmem, const __half* __restrict__ weights_this_layer, OUT_T* __restrict__ out_intermediate_threadblock_this_layer, const OUT_T* __restrict__ activation_aux = nullptr) {
 	// --- 中文注释 ---
-	// `threadblock_layer`: 这是融合MLP中最核心的设备函数，负责处理一个“标准”隐藏层（即输入和输出宽度都等于网络宽度WIDTH）的前向或反向传播。
+	// `threadblock_layer`: 这是融合MLP中最核心的设备函数，负责处理一个"标准"隐藏层（即输入和输出宽度都等于网络宽度WIDTH）的前向或反向传播。
 	//
 	// 工作流程:
 	// 1.  **加载权重**: 每个warp从全局内存中加载它所负责处理的那部分权重矩阵到寄存器中。
@@ -100,11 +103,11 @@ __device__ void threadblock_layer(Activation activation, __half* __restrict__ ac
 	Accumulator result_frag[N_ITERS];
 
 	// Indices
-	const uint32_t li = threadIdx.x; // index in warp ("lane index")
-	const uint32_t wi = threadIdx.y; // index in block ("warp index")
+	const uint32_t li = threadIdx.x; // index in wave ("lane index")
+	const uint32_t wi = threadIdx.y; // index in block ("wave index")
 
 	const uint32_t lane_offset = (8 * li) % WIDTH;
-	const uint32_t row = (8 * li + wi * 8 * 32) / WIDTH;
+	const uint32_t row = (8 * li + wi * 8 * WAVE_SIZE) / WIDTH;  // Updated for 64-thread waves
 
 	const uint32_t weights_col = 16 * wi;
 
@@ -173,11 +176,11 @@ __device__ void threadblock_load_input_static(__half* __restrict__ act_shmem, co
 	constexpr uint32_t SKEW = WIDTH % 16 == 0 ? 8 : 0;
 
 	// Indices
-	const uint32_t li = threadIdx.x; // index in warp ("lane index")
-	const uint32_t wi = threadIdx.y; // index in block ("warp index")
+	const uint32_t li = threadIdx.x; // index in wave ("lane index")
+	const uint32_t wi = threadIdx.y; // index in block ("wave index")
 
 	const uint32_t lane_offset = (8 * li) % WIDTH;
-	const uint32_t row = (8 * li + wi * 8 * 32) / WIDTH;
+	const uint32_t row = (8 * li + wi * 8 * WAVE_SIZE) / WIDTH;  // Updated for 64-thread waves
 
 	TCNN_PRAGMA_UNROLL
 	for (int i = 0; i < N_ITERS; ++i) {
@@ -207,8 +210,8 @@ __global__ void kernel_mlp_fused_backward(
 	constexpr uint32_t SKEW = WIDTH % 16 == 0 ? 8 : 0;
 
 	// Indices
-	const uint32_t li = threadIdx.x; // index in warp ("lane index")
-	const uint32_t wi = threadIdx.y; // index in block ("warp index")
+	const uint32_t li = threadIdx.x; // index in wave ("lane index")
+	const uint32_t wi = threadIdx.y; // index in block ("wave index")
 	const uint32_t bi = blockIdx.x;  // block index
 
 	// Shared memory contains the intermediate activations of blockDim.y*16 elements.
@@ -217,7 +220,7 @@ __global__ void kernel_mlp_fused_backward(
 	__half* act_shmem = shmem;
 
 	const uint32_t lane_offset = (8 * li) % WIDTH;
-	const uint32_t row = (8 * li + wi * 8 * 32) / WIDTH;
+	const uint32_t row = (8 * li + wi * 8 * WAVE_SIZE) / WIDTH;  // Updated for 64-thread waves
 
 	// Multipying one 16-row chunk of intermediate activations with the weight matrix requires all warps of the block.
 	// Thus, each block computes exactly one 16-row chunk of the next layer's intermediate activations.
@@ -333,7 +336,9 @@ std::enable_if_t<std::is_same<__half, T>::value> mlp_fused_backward(
 	CHECK_THROW(batch_size % (16 * N_ITERS) == 0);
 	CHECK_THROW(!dL_dinput || dL_dinput->layout() == RM || dL_dinput->stride() == dL_dinput->m());
 
-	const dim3 threads = { 32u, N_BLOCKS, 1 }; // 32 threads = 1 warp, 8 warps per block for 16 rows, up to 2x 8 warps can share input (does not help vs. 1)
+	// ROCm: AMD GPUs use 64-thread waves (not 32-thread warps like NVIDIA)
+	// rocWMMA requires the entire wavefront to be active
+	const dim3 threads = { WAVE_SIZE, N_BLOCKS, 1 }; // Full wave per row, N_BLOCKS waves per block
 
 	uint32_t n_elems_per_block = 16 * N_ITERS;
 	uint32_t n_blocks = div_round_up(batch_size, n_elems_per_block);
@@ -386,20 +391,20 @@ __device__ void threadblock_input_layer_forward_dynamic(Activation activation, _
 	fragment<accumulator, 16, 16, 16, OUT_T> result_frag[N_ITERS];
 
 	// Indices
-	const uint32_t li = threadIdx.x; // index in warp ("lane index")
-	const uint32_t wi = threadIdx.y; // index in block ("warp index")
+	const uint32_t li = threadIdx.x; // index in wave ("lane index")
+	const uint32_t wi = threadIdx.y; // index in block ("wave index")
 
 	const uint32_t lane_offset = (8 * li) % WIDTH;
-	const uint32_t row = (8 * li + wi * 8 * 32) / WIDTH;
+	const uint32_t row = (8 * li + wi * 8 * WAVE_SIZE) / WIDTH;  // Updated for 64-thread waves
 
 	const uint32_t weights_col = 16 * wi;
 
 	__half* __restrict__ weights_shmem = act_shmem + 16 * (in_width + INPUT_SKEW);
 
 	// Load input weight matrix (fits completely into shared memory)
-	// Each thread can load 8 fp16 elements (16 bytes) at once; we have N_BLOCKS warps
-	const uint32_t n_elems_per_load = N_BLOCKS * 32 * 8;
-	const uint32_t thread_elem_idx = (li + wi * 32) * 8;
+	// Each thread can load 8 fp16 elements (16 bytes) at once; we have N_BLOCKS waves
+	const uint32_t n_elems_per_load = N_BLOCKS * WAVE_SIZE * 8;  // Updated for 64-thread waves
+	const uint32_t thread_elem_idx = (li + wi * WAVE_SIZE) * 8;  // Updated for 64-thread waves
 
 	const uint32_t n_elems_b = WIDTH * in_width;
 
@@ -531,13 +536,13 @@ __device__ void threadblock_last_layer_forward(Activation activation, __half* __
 	fragment<accumulator, 16, 16, 16, OUT_T> result_frag;
 
 	// Indices
-	const uint32_t li = threadIdx.x; // index in warp ("lane index")
-	const uint32_t wi = threadIdx.y; // index in block ("warp index")
+	const uint32_t li = threadIdx.x; // index in wave ("lane index")
+	const uint32_t wi = threadIdx.y; // index in block ("wave index")
 
 	__half* __restrict__ weights_shmem = act_shmem + N_ITERS * 16 * (WIDTH + SKEW);
 
 	const uint32_t weights_row = (8 * li) % WIDTH;
-	const uint32_t weights_col = (8 * li + 8 * 32 * wi) / WIDTH;
+	const uint32_t weights_col = (8 * li + 8 * WAVE_SIZE * wi) / WIDTH;  // Updated for 64-thread waves
 
 	// Load weight matrix into shared memory for the last multiplication.
 	// Loading into shared memory as opposed to directly into registers is faster
@@ -583,11 +588,11 @@ __device__ void threadblock_write_output_static(const __half* __restrict__ act_s
 	constexpr uint32_t SKEW = WIDTH % 16 == 0 ? 8 : 0;
 
 	// Indices
-	const uint32_t li = threadIdx.x; // index in warp ("lane index")
-	const uint32_t wi = threadIdx.y; // index in block ("warp index")
+	const uint32_t li = threadIdx.x; // index in wave ("lane index")
+	const uint32_t wi = threadIdx.y; // index in block ("wave index")
 
 	const uint32_t lane_offset = (8 * li) % WIDTH;
-	const uint32_t row = (8 * li + wi * 8 * 32) / WIDTH;
+	const uint32_t row = (8 * li + wi * 8 * WAVE_SIZE) / WIDTH;  // Updated for 64-thread waves
 
 	__syncthreads();
 
@@ -728,7 +733,10 @@ std::enable_if_t<std::is_same<__half, T>::value> mlp_fused_forward(
 		throw std::runtime_error{fmt::format("Batch size must be a multiple of {}.", 16 * N_ITERS)};
 	}
 
-	const dim3 threads = { 32u, N_BLOCK_ROWS, 1 }; // 32 threads = 1 warp, N_BLOCK_ROWS warps per block for 16 rows, up to 2x 8 warps can share input (does not help vs. 1)
+	// ROCm: AMD GPUs use 64-thread waves (not 32-thread warps like NVIDIA)
+	// rocWMMA requires the entire wavefront to be active
+	// Reference: https://rocwmma.readthedocs.io/en/latest/conceptual/programmers-guide.html
+	const dim3 threads = { WAVE_SIZE, N_BLOCK_ROWS, 1 }; // Full wave per row, N_BLOCK_ROWS waves per block
 
 	uint32_t n_elems_per_block = 16 * N_ITERS;
 	uint32_t n_blocks = div_round_up(batch_size, n_elems_per_block);
