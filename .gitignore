@@ -7,3 +7,6 @@ dist
 /.cache
 /.vscode
 /*.jpg
+
+# Allow shell scripts in test directory
+!test/*.sh
