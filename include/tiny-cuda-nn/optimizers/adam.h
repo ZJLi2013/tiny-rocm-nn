@@ -310,10 +310,11 @@ public:
 			m_param_steps.data()
 		);
 		
-		// v23: Weight clipping - prevent FP16 overflow
-		// This is the critical protection against weight accumulation overflow
+		// v24: Weight clipping - prevent FP16 overflow in weights AND activations
+		// Reduced from 100 to 10 to prevent activation overflow
+		// Calculation: 64 inputs × 10 (max_weight) × 1.0 (max_input) = 640 << 65504 ✓
 		if (m_weight_clipping_enabled) {
-			const float max_weight = 100.0f;  // Safe margin below FP16 max (65504)
+			const float max_weight = 10.0f;  // v24: Reduced to prevent activation overflow
 			linear_kernel(clamp_weights<T>, 0, stream,
 				n_weights_to_optimize,
 				weights_full_precision,
@@ -324,7 +325,7 @@ public:
 			
 			// Monitor (every 100 steps)
 			if (m_current_step % 100 == 0) {
-				printf("[v23 Weight Clipping] Step %u: max_weight=%.1f (FP16 max=65504)\n",
+				printf("[v24 Weight Clipping] Step %u: max_weight=%.1f (prevents activation overflow)\n",
 				       m_current_step, max_weight);
 			}
 		}
