@@ -115,10 +115,7 @@ __device__ void threadblock_layer(Activation activation, __half* __restrict__ ac
 		for (uint32_t i = 0; i < N_BLOCKS; ++i) {
 			// Load a chunk of intermediate activations from shared memory and multiply with chunk of weights
 			load_matrix_sync(act_frag, act_shmem + 16 * i + (16 * l) * (WIDTH + SKEW), WIDTH + SKEW);
-			// v18
-			__syncthreads(); 
 			mma_sync(result_frag[l], act_frag, weights_frag[i], result_frag[l]);
-			__syncthreads(); 
 		}
 
 		// Activation
