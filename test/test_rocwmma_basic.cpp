@@ -80,13 +80,17 @@ void print_matrix(const char* name, const std::vector<__half>& mat, int rows, in
 }
 
 // CPU reference implementation for verification
+// A is row-major: A[i][k] = A[i*K + k]
+// B is col-major: B[k][j] = B[j*K + k]
 void cpu_matmul(const std::vector<__half>& A, const std::vector<__half>& B, 
                 std::vector<float>& C, int M, int N, int K) {
     for (int i = 0; i < M; i++) {
         for (int j = 0; j < N; j++) {
             float sum = 0.0f;
             for (int k = 0; k < K; k++) {
-                sum += __half2float(A[i * K + k]) * __half2float(B[k * N + j]);
+                // A is row-major: A[i][k] at index i*K + k
+                // B is col-major: B[k][j] at index j*K + k
+                sum += __half2float(A[i * K + k]) * __half2float(B[j * K + k]);
             }
             C[i * N + j] = sum;
         }
@@ -114,16 +118,49 @@ int main() {
         }
     }
     
-    for (int i = 0; i < K; i++) {
-        for (int j = 0; j < N; j++) {
-            // B: stored in col-major order for rocWMMA
-            h_B[i * N + j] = __float2half((i - j) * 0.1f);
+    // B matrix: We need to store it in col-major format for rocWMMA
+    // B[k][n] in mathematical notation, stored as B[n*K + k] in memory
+    for (int k = 0; k < K; k++) {
+        for (int n = 0; n < N; n++) {
+            // Store in col-major: column n, row k
+            h_B[n * K + k] = __float2half((k - n) * 0.1f);
         }
     }
+    
+    // Print first 4x4 of inputs for debugging
+    std::cout << "Input A (first 4x4, row-major):\n";
+    for (int i = 0; i < 4; i++) {
+        for (int j = 0; j < 4; j++) {
+            std::cout << std::setw(6) << std::fixed << std::setprecision(2) 
+                      << __half2float(h_A[i * K + j]) << " ";
+        }
+        std::cout << "\n";
+    }
+    std::cout << "\n";
+    
+    std::cout << "Input B (first 4x4, stored col-major):\n";
+    for (int k = 0; k < 4; k++) {
+        for (int n = 0; n < 4; n++) {
+            std::cout << std::setw(6) << std::fixed << std::setprecision(2) 
+                      << __half2float(h_B[n * K + k]) << " ";
+        }
+        std::cout << "\n";
+    }
+    std::cout << "\n";
     
     // Compute CPU reference
     std::cout << "Computing CPU reference...\n";
     cpu_matmul(h_A, h_B, h_C_ref, M, N, K);
+    
+    std::cout << "CPU Reference C (first 4x4):\n";
+    for (int i = 0; i < 4; i++) {
+        for (int j = 0; j < 4; j++) {
+            std::cout << std::setw(8) << std::fixed << std::setprecision(3) 
+                      << h_C_ref[i * N + j] << " ";
+        }
+        std::cout << "\n";
+    }
+    std::cout << "\n";
     
     // Allocate device memory
     __half *d_A, *d_B, *d_C;
