@@ -24,7 +24,11 @@ __global__ void test_rocwmma_matmul_kernel(
     fill_fragment(c_frag, __float2half(0.0f));
     
     // Load matrices from global memory
+    // For row-major A: leading dimension is K (number of columns)
     load_matrix_sync(a_frag, A, 16);
+    
+    // For col-major B: leading dimension is K (number of rows in the column-major layout)
+    // In col-major, the leading dimension is the stride between columns
     load_matrix_sync(b_frag, B, 16);
     
     // Perform matrix multiplication: C = A * B + C
@@ -172,9 +176,9 @@ int main() {
     hipMemcpy(d_A, h_A.data(), size * sizeof(__half), hipMemcpyHostToDevice);
     hipMemcpy(d_B, h_B.data(), size * sizeof(__half), hipMemcpyHostToDevice);
     
-    // Test 1: FP16 accumulator
+    // Test 1: FP16 Accumulator
     std::cout << "\n--- Test 1: FP16 Accumulator ---\n";
-    dim3 block(32, 1, 1);  // 32 threads = 1 wave on AMD
+    dim3 block(64, 1, 1);  // 64 threads = 1 wave on AMD (rocWMMA requires 64 threads)
     dim3 grid(1, 1, 1);
     
     hipLaunchKernelGGL(test_rocwmma_matmul_kernel, grid, block, 0, 0, d_A, d_B, d_C);
