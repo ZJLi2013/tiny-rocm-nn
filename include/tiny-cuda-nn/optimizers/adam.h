@@ -45,74 +45,6 @@
 
 namespace tcnn {
 
-// v22: Gradient clipping - compute L2 norm of gradients
-template <typename T>
-__global__ void compute_gradient_norm_squared(
-	const uint32_t n_elements,
-	const T* __restrict__ gradients,
-	const float loss_scale,
-	float* __restrict__ partial_sums,
-	const uint32_t n_blocks
-) {
-	const uint32_t i = threadIdx.x + blockIdx.x * blockDim.x;
-	
-	// Shared memory for block-level reduction
-	__shared__ float shmem[256];
-	
-	float sum = 0.0f;
-	if (i < n_elements) {
-		float g = (float)gradients[i] / loss_scale;
-		sum = g * g;
-	}
-	
-	shmem[threadIdx.x] = sum;
-	__syncthreads();
-	
-	// Block-level reduction
-	for (uint32_t s = blockDim.x / 2; s > 0; s >>= 1) {
-		if (threadIdx.x < s) {
-			shmem[threadIdx.x] += shmem[threadIdx.x + s];
-		}
-		__syncthreads();
-	}
-	
-	// Write block result
-	if (threadIdx.x == 0) {
-		partial_sums[blockIdx.x] = shmem[0];
-	}
-}
-
-// v22: Scale gradients for clipping
-template <typename T>
-__global__ void scale_gradients(
-	const uint32_t n_elements,
-	T* __restrict__ gradients,
-	const float scale
-) {
-	const uint32_t i = threadIdx.x + blockIdx.x * blockDim.x;
-	if (i < n_elements) {
-		gradients[i] = (T)((float)gradients[i] * scale);
-	}
-}
-
-// v23: Clamp weights to prevent FP16 overflow
-template <typename T>
-__global__ void clamp_weights(
-	const uint32_t n_elements,
-	float* __restrict__ weights_fp32,
-	T* __restrict__ weights_fp16,
-	const float min_val,
-	const float max_val
-) {
-	const uint32_t i = threadIdx.x + blockIdx.x * blockDim.x;
-	if (i < n_elements) {
-		float w = weights_fp32[i];
-		w = fminf(fmaxf(w, min_val), max_val);
-		weights_fp32[i] = w;
-		weights_fp16[i] = (T)w;
-	}
-}
-
 template <typename T>
 __global__ void adam_step(
 	const uint32_t n_elements,
@@ -219,63 +151,6 @@ public:
 	void step(hipStream_t stream, float loss_scale, float* weights_full_precision, T* weights, const T* gradients) override {
 		++m_current_step;
 
-		// v22: Gradient clipping
-		const float max_grad_norm = 5.0f;  // Configurable parameter
-		float grad_norm = 0.0f;
-		bool clipped = false;
-		
-		uint32_t n_weights_to_optimize = n_weights();
-		
-		// Allocate temporary buffers for gradient clipping (only once)
-		if (m_gradient_clipping_enabled && m_partial_sums.size() == 0) {
-			const uint32_t n_threads = 256;
-			const uint32_t n_blocks = div_round_up(n_weights_to_optimize, n_threads);
-			m_partial_sums.resize(n_blocks);
-			m_partial_sums_host.resize(n_blocks);
-		}
-		
-		if (m_gradient_clipping_enabled) {
-			// 1. Compute gradient norm
-			const uint32_t n_threads = 256;
-			const uint32_t n_blocks = div_round_up(n_weights_to_optimize, n_threads);
-			
-			linear_kernel(compute_gradient_norm_squared<T>, 0, stream,
-				n_weights_to_optimize,
-				gradients,
-				loss_scale,
-				m_partial_sums.data(),
-				n_blocks
-			);
-			
-			// 2. Sum partial results on CPU (simple but works)
-			hipStreamSynchronize(stream);
-			hipMemcpy(m_partial_sums_host.data(), m_partial_sums.data(), 
-			          n_blocks * sizeof(float), hipMemcpyDeviceToHost);
-			
-			float sum_sq = 0.0f;
-			for (uint32_t i = 0; i < n_blocks; ++i) {
-				sum_sq += m_partial_sums_host[i];
-			}
-			grad_norm = sqrtf(sum_sq);
-			
-			// 3. Clip if necessary
-			if (grad_norm > max_grad_norm) {
-				float scale = max_grad_norm / grad_norm;
-				linear_kernel(scale_gradients<T>, 0, stream,
-					n_weights_to_optimize,
-					const_cast<T*>(gradients),  // Need to modify gradients
-					scale
-				);
-				clipped = true;
-			}
-			
-			// 4. Monitor (every 100 steps)
-			if (m_current_step % 100 == 0) {
-				printf("[v22 Gradient Clipping] Step %u: grad_norm=%.4f, max_norm=%.1f, clipped=%s\n",
-				       m_current_step, grad_norm, max_grad_norm, clipped ? "YES" : "NO");
-			}
-		}
-
 		float lower_lr_bound = 0;
 		float upper_lr_bound = std::numeric_limits<float>::max();
 
@@ -286,7 +161,7 @@ public:
 		}
 
 		linear_kernel(adam_step<T>, 0, stream,
-			n_weights_to_optimize,
+			n_weights(),
 			m_n_weights_covered_by_matrices,
 			m_relative_weight_decay,
 			m_absolute_weight_decay,
@@ -309,26 +184,6 @@ public:
 			m_second_moments.data(),
 			m_param_steps.data()
 		);
-		
-		// v24: Weight clipping - prevent FP16 overflow in weights AND activations
-		// Reduced from 100 to 10 to prevent activation overflow
-		// Calculation: 64 inputs × 10 (max_weight) × 1.0 (max_input) = 640 << 65504 ✓
-		if (m_weight_clipping_enabled) {
-			const float max_weight = 10.0f;  // v24: Reduced to prevent activation overflow
-			linear_kernel(clamp_weights<T>, 0, stream,
-				n_weights_to_optimize,
-				weights_full_precision,
-				weights,
-				-max_weight,
-				max_weight
-			);
-			
-			// Monitor (every 100 steps)
-			if (m_current_step % 100 == 0) {
-				printf("[v24 Weight Clipping] Step %u: max_weight=%.1f (prevents activation overflow)\n",
-				       m_current_step, max_weight);
-			}
-		}
 	}
 
 	float learning_rate() const override {
@@ -449,14 +304,6 @@ private:
 	GPUMemory<float> m_first_moments;
 	GPUMemory<float> m_second_moments;
 	GPUMemory<uint32_t> m_param_steps;
-
-	// v22: Gradient clipping buffers
-	GPUMemory<float> m_partial_sums;
-	std::vector<float> m_partial_sums_host;
-	bool m_gradient_clipping_enabled = true;  // Enable by default
-	
-	// v23: Weight clipping
-	bool m_weight_clipping_enabled = true;  // Enable by default
 
 	uint32_t m_current_step = 0;
 

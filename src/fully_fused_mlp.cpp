@@ -78,7 +78,11 @@ __device__ void threadblock_layer(Activation activation, __half* __restrict__ ac
 	// Fragments
 	using MatrixA = fragment<matrix_a, 16, 16, 16, __half, row_major>;
 	using MatrixB = fragment<matrix_b, 16, 16, 16, __half, weights_layout_t>;
-	using Accumulator = fragment<accumulator, 16, 16, 16, OUT_T>;
+	
+	// v27: Use FP32 accumulator to leverage AMD Matrix Core's native FP32 accumulation capability
+	// Reference: https://gpuopen.com/learn/amd-lab-notes/amd-lab-notes-matrix-cores-readme/
+	// CDNA2/CDNA3 supports: Input A/B (FP16) × Accumulator C/D (FP32)
+	using Accumulator = fragment<accumulator, 16, 16, 16, float>;
 
 	MatrixA act_frag;
 	MatrixB weights_frag[N_BLOCKS];
@@ -115,38 +119,32 @@ __device__ void threadblock_layer(Activation activation, __half* __restrict__ ac
 		for (uint32_t i = 0; i < N_BLOCKS; ++i) {
 			// Load a chunk of intermediate activations from shared memory and multiply with chunk of weights
 			load_matrix_sync(act_frag, act_shmem + 16 * i + (16 * l) * (WIDTH + SKEW), WIDTH + SKEW);
+			// v27: FP16×FP16 → FP32 accumulation (leveraging AMD Matrix Core hardware capability)
 			mma_sync(result_frag[l], act_frag, weights_frag[i], result_frag[l]);
 		}
 
-		// Activation
+		// v27: Activation function executed in FP32 precision for maximum numerical stability
 		if (BACKWARD) {
 			// Load the temporary forward matrix for the relu transfer
 			load_matrix_sync(act_frag, activation_aux + weights_col + l * 16 * WIDTH, WIDTH);
-			warp_activation_backward<__half>(activation, result_frag[l], act_frag, result_frag[l]);
+			warp_activation_backward<float>(activation, result_frag[l], act_frag, result_frag[l]);
 		} else {
-			warp_activation<__half>(activation, result_frag[l], result_frag[l]);
+			warp_activation<float>(activation, result_frag[l], result_frag[l]);
 		}
-		
-		// v25: Clamp activation values to prevent FP16 overflow
-		// This prevents multi-layer accumulation from exceeding FP16 range (65504)
-		// max_activation=1000 ensures: 64 × 10 × 1000 = 640,000 → clamp → 1000 ✓
-		TCNN_PRAGMA_UNROLL
-		for (int i = 0; i < result_frag[l].num_elements; ++i) {
-			float val = (float)result_frag[l].x[i];
-			val = fminf(fmaxf(val, -1000.0f), 1000.0f);
-			result_frag[l].x[i] = (OUT_T)val;
-		}
-		
-		// v21: Add sync after each iteration (8 times total, not 72)
-		// This provides numerical stability without excessive overhead
-		__syncthreads();
 	}
 
+	// v19: Minimal synchronization - only sync after all iterations complete
 	__syncthreads();
 
+	// v27: Convert FP32 accumulator results back to FP16 for storage
+	// This controlled conversion point maximizes precision while maintaining FP16 storage
 	TCNN_PRAGMA_UNROLL
 	for (int l = 0; l < N_ITERS; ++l) {
-		store_matrix_sync(act_shmem + weights_col + l * 16 * (WIDTH + SKEW), result_frag[l], WIDTH + SKEW, mem_row_major);
+		fragment<accumulator, 16, 16, 16, __half> result_frag_fp16;
+		for (int i = 0; i < result_frag[l].num_elements; ++i) {
+			result_frag_fp16.x[i] = __float2half(result_frag[l].x[i]);
+		}
+		store_matrix_sync(act_shmem + weights_col + l * 16 * (WIDTH + SKEW), result_frag_fp16, WIDTH + SKEW, mem_row_major);
 	}
 
 	if (out_intermediate_threadblock_this_layer != nullptr) {
@@ -227,7 +225,8 @@ __global__ void kernel_mlp_fused_backward(
 		// Fragments in registers
 		fragment<matrix_a, 16, 16, 16, __half, OUTPUT_LAYOUT> act_frag;
 		fragment<matrix_b, 16, 16, 16, __half, row_major> weights_frag;
-		fragment<accumulator, 16, 16, 16, __half> result_frag[N_ITERS];
+		// v27: Use FP32 accumulator in backward pass as well
+		fragment<accumulator, 16, 16, 16, float> result_frag[N_ITERS];
 
 		// Load the relevant chunk of the last layer's weight matrix from global memory into registers
 		const uint32_t weights_col = 16 * wi;
@@ -254,14 +253,20 @@ __global__ void kernel_mlp_fused_backward(
 			fragment<matrix_a, 16, 16, 16, __half, row_major> forward_frag;
 			load_matrix_sync(forward_frag, forward + layer_stride * n_hidden_matmuls + weights_col + (elem_idx + l * 16) * WIDTH, WIDTH);
 
-			warp_activation_backward<__half>(ACTIVATION, result_frag[l], forward_frag, result_frag[l]);
+			// v27: Activation backward in FP32 precision
+			warp_activation_backward<float>(ACTIVATION, result_frag[l], forward_frag, result_frag[l]);
 		}
 
 		__syncthreads();
 
+		// v27: Convert FP32 gradients to FP16 for storage
 		TCNN_PRAGMA_UNROLL
 		for (int l = 0; l < N_ITERS; ++l) {
-			store_matrix_sync(act_shmem + weights_col + (16 * l) * (WIDTH + SKEW), result_frag[l], WIDTH + SKEW, mem_row_major);
+			fragment<accumulator, 16, 16, 16, __half> result_frag_fp16;
+			for (int i = 0; i < result_frag[l].num_elements; ++i) {
+				result_frag_fp16.x[i] = __float2half(result_frag[l].x[i]);
+			}
+			store_matrix_sync(act_shmem + weights_col + (16 * l) * (WIDTH + SKEW), result_frag_fp16, WIDTH + SKEW, mem_row_major);
 		}
 
 		__syncthreads();
@@ -364,7 +369,8 @@ __device__ void threadblock_input_layer_forward_dynamic(Activation activation, _
 	// Fragments: small tiles of matrices 
 	fragment<matrix_a, 16, 16, 16, __half, INPUT_LAYOUT> act_frag;
 	fragment<matrix_b, 16, 16, 16, __half, col_major> weights_frag;
-	fragment<accumulator, 16, 16, 16, OUT_T> result_frag[N_ITERS];
+	// v27: Use FP32 accumulator for input layer as well
+	fragment<accumulator, 16, 16, 16, float> result_frag[N_ITERS];
 
 	// Indices
 	const uint32_t li = threadIdx.x; // index in wave ("lane index")
@@ -436,17 +442,22 @@ __device__ void threadblock_input_layer_forward_dynamic(Activation activation, _
 			__syncthreads();
 		}
 
-		//  in  common_device.h
-		warp_activation<__half>(activation, result_frag[l], result_frag[l]);
+		// v27: Activation in FP32 precision
+		warp_activation<float>(activation, result_frag[l], result_frag[l]);
 	}
 
 	if (std::is_same<INPUT_LAYOUT, col_major>::value) {
 		__syncthreads();
 	}
 
+	// v27: Convert FP32 results to FP16 for storage
 	TCNN_PRAGMA_UNROLL
 	for (int l = 0; l < N_ITERS; ++l) {
-		store_matrix_sync(act_shmem + weights_col + (16 * l) * (WIDTH + SKEW), result_frag[l], WIDTH + SKEW, mem_row_major);
+		fragment<accumulator, 16, 16, 16, __half> result_frag_fp16;
+		for (int i = 0; i < result_frag[l].num_elements; ++i) {
+			result_frag_fp16.x[i] = __float2half(result_frag[l].x[i]);
+		}
+		store_matrix_sync(act_shmem + weights_col + (16 * l) * (WIDTH + SKEW), result_frag_fp16, WIDTH + SKEW, mem_row_major);
 	}
 
 	if (out_intermediate_threadblock_this_layer != nullptr) {
@@ -476,7 +487,8 @@ __device__ void threadblock_last_layer_forward(Activation activation, __half* __
 	// Fragments
 	fragment<matrix_a, 16, 16, 16, __half, row_major> act_frag;
 	fragment<matrix_b, 16, 16, 16, __half, col_major> weights_frag[N_BLOCKS];
-	fragment<accumulator, 16, 16, 16, OUT_T> result_frag;
+	// v27: Use FP32 accumulator for last layer
+	fragment<accumulator, 16, 16, 16, float> result_frag;
 
 	// Indices
 	const uint32_t li = threadIdx.x; // index in wave ("lane index")
@@ -508,12 +520,19 @@ __device__ void threadblock_last_layer_forward(Activation activation, __half* __
 			mma_sync(result_frag, act_frag, weights_frag[i], result_frag);
 		}
 
-		warp_activation<__half>(activation, result_frag, result_frag);
+		// v27: Activation in FP32 precision
+		warp_activation<float>(activation, result_frag, result_frag);
+
+		// v27: Convert to FP16 for output
+		fragment<accumulator, 16, 16, 16, __half> result_frag_fp16;
+		for (int i = 0; i < result_frag.num_elements; ++i) {
+			result_frag_fp16.x[i] = __float2half(result_frag.x[i]);
+		}
 
 		if (output_layout == mem_row_major) {
-			store_matrix_sync(out + idx * 16 * output_stride, result_frag, output_stride, output_layout);
+			store_matrix_sync(out + idx * 16 * output_stride, result_frag_fp16, output_stride, output_layout);
 		} else {
-			store_matrix_sync(out + idx * 16, result_frag, output_stride, output_layout);
+			store_matrix_sync(out + idx * 16, result_frag_fp16, output_stride, output_layout);
 		}
 	}
 }
