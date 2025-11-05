@@ -442,6 +442,69 @@ __host__ __device__ void warp_activation_backward(Activation activation, const f
 	}
 }
 
+// v27: Overload to support mixed precision (FP32 accumulator with FP16 forward activations)
+// This allows using FP32 accumulator while forward activations are stored in FP16
+template <typename T_result, typename T_forward, typename fragment_t, typename forward_fragment_t>
+__host__ __device__ void warp_activation_backward_mixed(Activation activation, const fragment_t& frag, const forward_fragment_t& forward_frag, fragment_t& result) {
+	switch (activation) {
+		case Activation::ReLU:
+			TCNN_PRAGMA_UNROLL
+			for (int t=0; t < result.num_elements; t++) {
+				result.x[t] = frag.x[t] * (T_result)((T_forward)forward_frag.x[t] > (T_forward)0.0f);
+			}
+			return;
+		case Activation::LeakyReLU:
+			TCNN_PRAGMA_UNROLL
+			for (int t=0; t < result.num_elements; t++) {
+				result.x[t] = frag.x[t] * (T_result)((T_forward)forward_frag.x[t] > (T_forward)0.0f ? 1.0f : 0.01f);
+			}
+			return;
+		case Activation::Exponential:
+			TCNN_PRAGMA_UNROLL
+			for (int t=0; t < result.num_elements; t++) {
+				result.x[t] = frag.x[t] * (T_result)forward_frag.x[t];
+			}
+			return;
+		case Activation::Sine:
+			// Sine requires stored pre-activations, which we don't have. We only
+			// write out the post-activations.
+			// assert(false); // Commented out due to isolated strange side-effects on Windows
+			return;
+		case Activation::Sigmoid:
+			TCNN_PRAGMA_UNROLL
+			for (int t=0; t < result.num_elements; t++) {
+				T_forward fwd = (T_forward)forward_frag.x[t];
+				result.x[t] = frag.x[t] * (T_result)(fwd * (T_forward)(1.0f - (float)fwd));
+			}
+			return;
+		case Activation::Squareplus:
+			TCNN_PRAGMA_UNROLL
+			for (int t=0; t < result.num_elements; t++) {
+				float y = (float)forward_frag.x[t] * K_ACT;
+				result.x[t] = frag.x[t] * (T_result)(y * y / (y * y + 1));
+			}
+			return;
+		case Activation::Softplus:
+			TCNN_PRAGMA_UNROLL
+			for (int t=0; t < result.num_elements; t++) {
+				result.x[t] = frag.x[t] * (T_result)(1.0f - expf(-(float)forward_frag.x[t] * K_ACT));
+			}
+			return;
+		case Activation::Tanh:
+			TCNN_PRAGMA_UNROLL
+			for (int t=0; t < result.num_elements; t++) {
+				T_forward fwd = (T_forward)forward_frag.x[t];
+				result.x[t] = frag.x[t] * (T_result)(1.0f - ((float)fwd * (float)fwd));
+			}
+			return;
+		case Activation::None: result = frag; return;
+		default:
+			// Unsupported activation
+			// assert(false); // Commented out due to isolated strange side-effects on Windows
+			return;
+	}
+}
+
 template <typename T, typename fragment_t, typename forward_fragment_t>
 __host__ __device__ fragment_t warp_activation_backward(Activation activation, const fragment_t& frag, const forward_fragment_t& forward_frag) {
 	fragment_t result;
