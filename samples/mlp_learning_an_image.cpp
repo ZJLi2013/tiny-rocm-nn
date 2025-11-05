@@ -280,7 +280,7 @@ int main(int argc, char* argv[]) {
 
 		// Various constants for the network and optimization
 		const uint32_t batch_size = 1 << 18;  // Reset to original: 262144
-		const uint32_t n_training_steps = argc >= 4 ? atoi(argv[3]) : 2005;
+		const uint32_t n_training_steps = argc >= 4 ? atoi(argv[3]) : 5005;
 		const uint32_t n_input_dims = 2; // 2-D image coordinate
 		const uint32_t n_output_dims = 3; // RGB color
 
