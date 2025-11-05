@@ -45,6 +45,86 @@
 
 namespace tcnn {
 
+// v27 Diagnostic: Compute gradient statistics
+template <typename T>
+__global__ void compute_gradient_stats(
+	const uint32_t n_elements,
+	const T* __restrict__ gradients,
+	const float loss_scale,
+	float* __restrict__ partial_sums,
+	float* __restrict__ partial_max
+) {
+	const uint32_t i = threadIdx.x + blockIdx.x * blockDim.x;
+	
+	__shared__ float shmem_sum[256];
+	__shared__ float shmem_max[256];
+	
+	float sum = 0.0f;
+	float max_val = 0.0f;
+	if (i < n_elements) {
+		float g = (float)gradients[i] / loss_scale;
+		sum = g * g;
+		max_val = fabsf(g);
+	}
+	
+	shmem_sum[threadIdx.x] = sum;
+	shmem_max[threadIdx.x] = max_val;
+	__syncthreads();
+	
+	// Reduction
+	for (uint32_t s = blockDim.x / 2; s > 0; s >>= 1) {
+		if (threadIdx.x < s) {
+			shmem_sum[threadIdx.x] += shmem_sum[threadIdx.x + s];
+			shmem_max[threadIdx.x] = fmaxf(shmem_max[threadIdx.x], shmem_max[threadIdx.x + s]);
+		}
+		__syncthreads();
+	}
+	
+	if (threadIdx.x == 0) {
+		partial_sums[blockIdx.x] = shmem_sum[0];
+		partial_max[blockIdx.x] = shmem_max[0];
+	}
+}
+
+// v27 Diagnostic: Compute weight statistics
+template <typename T>
+__global__ void compute_weight_stats(
+	const uint32_t n_elements,
+	const float* __restrict__ weights_fp32,
+	const T* __restrict__ weights_fp16,
+	float* __restrict__ partial_max_fp32,
+	float* __restrict__ partial_max_fp16
+) {
+	const uint32_t i = threadIdx.x + blockIdx.x * blockDim.x;
+	
+	__shared__ float shmem_max_fp32[256];
+	__shared__ float shmem_max_fp16[256];
+	
+	float max_fp32 = 0.0f;
+	float max_fp16 = 0.0f;
+	if (i < n_elements) {
+		max_fp32 = fabsf(weights_fp32[i]);
+		max_fp16 = fabsf((float)weights_fp16[i]);
+	}
+	
+	shmem_max_fp32[threadIdx.x] = max_fp32;
+	shmem_max_fp16[threadIdx.x] = max_fp16;
+	__syncthreads();
+	
+	for (uint32_t s = blockDim.x / 2; s > 0; s >>= 1) {
+		if (threadIdx.x < s) {
+			shmem_max_fp32[threadIdx.x] = fmaxf(shmem_max_fp32[threadIdx.x], shmem_max_fp32[threadIdx.x + s]);
+			shmem_max_fp16[threadIdx.x] = fmaxf(shmem_max_fp16[threadIdx.x], shmem_max_fp16[threadIdx.x + s]);
+		}
+		__syncthreads();
+	}
+	
+	if (threadIdx.x == 0) {
+		partial_max_fp32[blockIdx.x] = shmem_max_fp32[0];
+		partial_max_fp16[blockIdx.x] = shmem_max_fp16[0];
+	}
+}
+
 template <typename T>
 __global__ void adam_step(
 	const uint32_t n_elements,
@@ -150,6 +230,61 @@ public:
 
 	void step(hipStream_t stream, float loss_scale, float* weights_full_precision, T* weights, const T* gradients) override {
 		++m_current_step;
+
+		// v27 Diagnostic: Monitor gradient and weight statistics every 100 steps
+		if (m_current_step % 100 == 0) {
+			const uint32_t n_threads = 256;
+			const uint32_t n_blocks = div_round_up(n_weights(), n_threads);
+			
+			// Allocate buffers on first use
+			if (m_diagnostic_buffers.size() == 0) {
+				m_diagnostic_buffers.resize(n_blocks * 2);  // For sums and maxes
+				m_diagnostic_host.resize(n_blocks * 2);
+			}
+			
+			// Compute gradient statistics
+			linear_kernel(compute_gradient_stats<T>, 0, stream,
+				n_weights(),
+				gradients,
+				loss_scale,
+				m_diagnostic_buffers.data(),
+				m_diagnostic_buffers.data() + n_blocks
+			);
+			
+			// Compute weight statistics
+			linear_kernel(compute_weight_stats<T>, 0, stream,
+				n_weights(),
+				weights_full_precision,
+				weights,
+				m_diagnostic_buffers.data(),
+				m_diagnostic_buffers.data() + n_blocks
+			);
+			
+			// Copy to host and compute final statistics
+			hipStreamSynchronize(stream);
+			hipMemcpy(m_diagnostic_host.data(), m_diagnostic_buffers.data(),
+			          n_blocks * 2 * sizeof(float), hipMemcpyDeviceToHost);
+			
+			// Gradient norm and max
+			float grad_sum_sq = 0.0f;
+			float grad_max = 0.0f;
+			for (uint32_t i = 0; i < n_blocks; ++i) {
+				grad_sum_sq += m_diagnostic_host[i];
+				grad_max = fmaxf(grad_max, m_diagnostic_host[i + n_blocks]);
+			}
+			float grad_norm = sqrtf(grad_sum_sq);
+			
+			// Weight max (FP32 and FP16)
+			float weight_max_fp32 = 0.0f;
+			float weight_max_fp16 = 0.0f;
+			for (uint32_t i = 0; i < n_blocks; ++i) {
+				weight_max_fp32 = fmaxf(weight_max_fp32, m_diagnostic_host[i]);
+				weight_max_fp16 = fmaxf(weight_max_fp16, m_diagnostic_host[i + n_blocks]);
+			}
+			
+			printf("[v27 Diagnostic] Step %u: grad_norm=%.4f, grad_max=%.4f, weight_max_fp32=%.4f, weight_max_fp16=%.4f\n",
+			       m_current_step, grad_norm, grad_max, weight_max_fp32, weight_max_fp16);
+		}
 
 		float lower_lr_bound = 0;
 		float upper_lr_bound = std::numeric_limits<float>::max();
@@ -304,6 +439,10 @@ private:
 	GPUMemory<float> m_first_moments;
 	GPUMemory<float> m_second_moments;
 	GPUMemory<uint32_t> m_param_steps;
+
+	// v27 Diagnostic: Buffers for monitoring
+	GPUMemory<float> m_diagnostic_buffers;
+	std::vector<float> m_diagnostic_host;
 
 	uint32_t m_current_step = 0;
 
