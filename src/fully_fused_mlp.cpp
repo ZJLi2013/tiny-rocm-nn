@@ -127,6 +127,16 @@ __device__ void threadblock_layer(Activation activation, __half* __restrict__ ac
 			warp_activation<__half>(activation, result_frag[l], result_frag[l]);
 		}
 		
+		// v25: Clamp activation values to prevent FP16 overflow
+		// This prevents multi-layer accumulation from exceeding FP16 range (65504)
+		// max_activation=1000 ensures: 64 × 10 × 1000 = 640,000 → clamp → 1000 ✓
+		TCNN_PRAGMA_UNROLL
+		for (int i = 0; i < result_frag[l].num_elements; ++i) {
+			float val = (float)result_frag[l].x[i];
+			val = fminf(fmaxf(val, -1000.0f), 1000.0f);
+			result_frag[l].x[i] = (OUT_T)val;
+		}
+		
 		// v21: Add sync after each iteration (8 times total, not 72)
 		// This provides numerical stability without excessive overhead
 		__syncthreads();
