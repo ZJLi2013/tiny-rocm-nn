@@ -140,7 +140,7 @@ __device__ void threadblock_layer(Activation activation, __half* __restrict__ ac
 			if (!BACKWARD && l == 0 && i == 0 && li == 0 && wi == 0 && blockIdx.x == 0) {
 				bool has_nan = false;
 				float sum = 0.0f;
-				int n_samples = min(5, act_frag.num_elements);
+				int n_samples = (act_frag.num_elements < 5) ? act_frag.num_elements : 5;
 				printf("[rocWMMA] act_frag before MMA samples: ");
 				for (int j = 0; j < n_samples; ++j) {
 					printf("%.4f ", float(act_frag.x[j]));
@@ -159,7 +159,7 @@ __device__ void threadblock_layer(Activation activation, __half* __restrict__ ac
 			if (!BACKWARD && l == 0 && i == 0 && li == 0 && wi == 0 && blockIdx.x == 0) {
 				bool has_nan = false;
 				float sum = 0.0f;
-				int n_samples = min(5, result_frag[l].num_elements);
+				int n_samples = (result_frag[l].num_elements < 5) ? result_frag[l].num_elements : 5;
 				printf("[rocWMMA] result_frag after MMA samples: ");
 				for (int j = 0; j < n_samples; ++j) {
 					printf("%.4f ", float(result_frag[l].x[j]));
@@ -186,7 +186,7 @@ __device__ void threadblock_layer(Activation activation, __half* __restrict__ ac
 		if (!BACKWARD && l == 0 && li == 0 && wi == 0 && blockIdx.x == 0) {
 			bool has_nan = false;
 			float sum = 0.0f;
-			int n_samples = min(5, result_frag[l].num_elements);
+			int n_samples = (result_frag[l].num_elements < 5) ? result_frag[l].num_elements : 5;
 			printf("[rocWMMA] result_frag after activation samples: ");
 			for (int j = 0; j < n_samples; ++j) {
 				printf("%.4f ", float(result_frag[l].x[j]));
