@@ -59,7 +59,7 @@ static int g_fc_multiply_split_k_call_counter = 0;
 // Helper to check if we should log this call (sample every Nth call after initial burst)
 inline bool should_log_gemm_call(int call_num) {
 	if (call_num <= 10) return true;  // Log first 20 calls
-	if (call_num >= 190 && call_num <= 200) return true;  // Log around where NaN appears (GEMM #195)
+	// if (call_num >= 190 && call_num <= 200) return true;  // Log around where NaN appears (GEMM #195)
 	// if (call_num % 100 == 0) return true;  // Sample every 100th call
 	return false;
 }

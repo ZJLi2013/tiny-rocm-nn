@@ -95,6 +95,24 @@ __global__ void scale_gradients(
 	}
 }
 
+// v23: Clamp weights to prevent FP16 overflow
+template <typename T>
+__global__ void clamp_weights(
+	const uint32_t n_elements,
+	float* __restrict__ weights_fp32,
+	T* __restrict__ weights_fp16,
+	const float min_val,
+	const float max_val
+) {
+	const uint32_t i = threadIdx.x + blockIdx.x * blockDim.x;
+	if (i < n_elements) {
+		float w = weights_fp32[i];
+		w = fminf(fmaxf(w, min_val), max_val);
+		weights_fp32[i] = w;
+		weights_fp16[i] = (T)w;
+	}
+}
+
 template <typename T>
 __global__ void adam_step(
 	const uint32_t n_elements,
@@ -291,6 +309,25 @@ public:
 			m_second_moments.data(),
 			m_param_steps.data()
 		);
+		
+		// v23: Weight clipping - prevent FP16 overflow
+		// This is the critical protection against weight accumulation overflow
+		if (m_weight_clipping_enabled) {
+			const float max_weight = 100.0f;  // Safe margin below FP16 max (65504)
+			linear_kernel(clamp_weights<T>, 0, stream,
+				n_weights_to_optimize,
+				weights_full_precision,
+				weights,
+				-max_weight,
+				max_weight
+			);
+			
+			// Monitor (every 100 steps)
+			if (m_current_step % 100 == 0) {
+				printf("[v23 Weight Clipping] Step %u: max_weight=%.1f (FP16 max=65504)\n",
+				       m_current_step, max_weight);
+			}
+		}
 	}
 
 	float learning_rate() const override {
@@ -416,6 +453,9 @@ private:
 	GPUMemory<float> m_partial_sums;
 	std::vector<float> m_partial_sums_host;
 	bool m_gradient_clipping_enabled = true;  // Enable by default
+	
+	// v23: Weight clipping
+	bool m_weight_clipping_enabled = true;  // Enable by default
 
 	uint32_t m_current_step = 0;
 
