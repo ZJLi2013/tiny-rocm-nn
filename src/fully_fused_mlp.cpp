@@ -95,10 +95,6 @@ __device__ void threadblock_layer(Activation activation, __half* __restrict__ ac
 
 	__syncthreads();
 
-	// v18: Add explicit synchronization after initial __syncthreads()
-	// Hypothesis: v17's printf introduced implicit sync that fixed the issue
-	__syncthreads();
-
 	// Load N_BLOCKS chunks of weights from global memory into registers.
 	TCNN_PRAGMA_UNROLL
 	for (uint32_t i = 0; i < N_BLOCKS; ++i) {
@@ -119,13 +115,7 @@ __device__ void threadblock_layer(Activation activation, __half* __restrict__ ac
 		for (uint32_t i = 0; i < N_BLOCKS; ++i) {
 			// Load a chunk of intermediate activations from shared memory and multiply with chunk of weights
 			load_matrix_sync(act_frag, act_shmem + 16 * i + (16 * l) * (WIDTH + SKEW), WIDTH + SKEW);
-			
-			// v18: Add sync before MMA operation
-			// This mimics where v17's printf was placed
-			__syncthreads();
-			
 			mma_sync(result_frag[l], act_frag, weights_frag[i], result_frag[l]);
-			__syncthreads();  // v18: Add sync after MMA
 		}
 
 		// Activation
@@ -136,8 +126,6 @@ __device__ void threadblock_layer(Activation activation, __half* __restrict__ ac
 		} else {
 			warp_activation<__half>(activation, result_frag[l], result_frag[l]);
 		}
-		
-		__syncthreads();  // v18: Add sync after activation
 	}
 
 	__syncthreads();
