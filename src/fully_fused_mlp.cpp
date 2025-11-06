@@ -91,8 +91,8 @@ __device__ void check_shmem_input(const __half* __restrict__ act_shmem, const ch
 			max_val = fmaxf(max_val, fabsf(val));
 		}
 		
-		// Only print if anomaly detected
-		if (has_nan || has_inf || max_val > THRESHOLD) {
+		// Only print if NaN or Inf detected (critical issues)
+		if (has_nan || has_inf) {
 			printf("[v32 ALERT] %s[%u]: NaN=%d(cnt=%d), Inf=%d, max=%.2f\n",
 			       layer_name, layer_idx, has_nan, nan_count, has_inf, max_val);
 			
@@ -102,7 +102,11 @@ __device__ void check_shmem_input(const __half* __restrict__ act_shmem, const ch
 				atomicMin(&g_first_nan_step, g_current_step);
 			}
 			if (has_inf) atomicAdd(&g_inf_detected, 1);
-			if (max_val > THRESHOLD) atomicAdd(&g_large_val_detected, 1);
+		} else if (max_val > THRESHOLD) {
+			// Only print large values if no NaN/Inf (less critical)
+			// Uncomment below if you want to track large values
+			// printf("[v32 INFO] %s[%u]: max=%.2f\n", layer_name, layer_idx, max_val);
+			atomicAdd(&g_large_val_detected, 1);
 		}
 	}
 }
@@ -145,6 +149,25 @@ __device__ void threadblock_layer(Activation activation, __half* __restrict__ ac
 	const uint32_t weights_col = 16 * wi;
 
 	__syncthreads();
+
+	// v33: Check weights for NaN (only first thread of first block, forward pass only)
+	if (blockIdx.x == 0 && threadIdx.x == 0 && threadIdx.y == 0 && !BACKWARD) {
+		bool has_nan = false;
+		int nan_count = 0;
+		const uint32_t max_check = (WIDTH * WIDTH < 256u) ? WIDTH * WIDTH : 256u;
+		
+		for (uint32_t i = 0; i < max_check; i++) {
+			float val = __half2float(weights_this_layer[i]);
+			if (isnan(val)) {
+				has_nan = true;
+				nan_count++;
+			}
+		}
+		
+		if (has_nan) {
+			printf("[v33 WEIGHT] NaN in weights: cnt=%d\n", nan_count);
+		}
+	}
 
 	// Load N_BLOCKS chunks of weights from global memory into registers.
 	TCNN_PRAGMA_UNROLL
@@ -625,12 +648,17 @@ __global__ void kernel_mlp_fused(const Activation output_activation, const __hal
 		// instead of using the slower dynamic input layer routine.
 		threadblock_load_input_static<WIDTH, N_ITERS>(act_shmem, input + elem_idx * WIDTH);
 		
-		// v32: Check input after loading into shmem
+		// v33: Check raw input (before FirstLayer computation)
 		if (!INFERENCE) {
-			check_shmem_input<WIDTH, N_ITERS>(act_shmem, "FirstLayer", 0);
+			check_shmem_input<WIDTH, N_ITERS>(act_shmem, "RawInput", 0);
 		}
 		
 		threadblock_layer<WIDTH, N_ITERS, OUT_T>(ACTIVATION, act_shmem, weights, !INFERENCE ? (out_intermediate + elem_idx * WIDTH) : nullptr);
+		
+		// v33: Check FirstLayer output (after FirstLayer computation)
+		if (!INFERENCE) {
+			check_shmem_input<WIDTH, N_ITERS>(act_shmem, "FirstLayer_Out", 0);
+		}
 	}
 
 	const uint32_t first_weights_stride = WIDTH * in_width;
