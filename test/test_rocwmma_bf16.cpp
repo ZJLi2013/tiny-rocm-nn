@@ -10,14 +10,14 @@
 // Test BF16×BF16 → FP32 matrix multiplication using rocWMMA
 // This validates v32 implementation feasibility
 __global__ void test_bf16_mma_kernel(
-    const __hip_bfloat16* A,  // BF16 input matrix A (row-major)
-    const __hip_bfloat16* B,  // BF16 input matrix B (col-major)
-    float* C                  // FP32 output matrix C (row-major)
+    const hip_bfloat16* A,  // BF16 input matrix A (row-major) - must match fragment type
+    const hip_bfloat16* B,  // BF16 input matrix B (col-major) - must match fragment type
+    float* C                // FP32 output matrix C (row-major)
 ) {
     using namespace rocwmma;
     
     // v32: BF16 input fragments, FP32 accumulator
-    // NOTE: rocWMMA uses hip_bfloat16, not __hip_bfloat16
+    // NOTE: Pointer type must match fragment DataT (hip_bfloat16)
     fragment<matrix_a, 16, 16, 16, hip_bfloat16, row_major> a_frag;
     fragment<matrix_b, 16, 16, 16, hip_bfloat16, col_major> b_frag;
     fragment<accumulator, 16, 16, 16, float> c_frag;
@@ -34,7 +34,7 @@ __global__ void test_bf16_mma_kernel(
 }
 
 // CPU reference implementation
-void cpu_matmul_bf16(const std::vector<__hip_bfloat16>& A, const std::vector<__hip_bfloat16>& B, 
+void cpu_matmul_bf16(const std::vector<hip_bfloat16>& A, const std::vector<hip_bfloat16>& B, 
                      std::vector<float>& C, int M, int N, int K) {
     for (int i = 0; i < M; i++) {
         for (int j = 0; j < N; j++) {
@@ -42,7 +42,8 @@ void cpu_matmul_bf16(const std::vector<__hip_bfloat16>& A, const std::vector<__h
             for (int k = 0; k < K; k++) {
                 // A is row-major: A[i][k] at index i*K + k
                 // B is col-major: B[k][j] at index j*K + k
-                sum += __bfloat162float(A[i * K + k]) * __bfloat162float(B[j * K + k]);
+                // hip_bfloat16 can be cast to float directly
+                sum += static_cast<float>(A[i * K + k]) * static_cast<float>(B[j * K + k]);
             }
             C[i * N + j] = sum;
         }
@@ -55,9 +56,9 @@ int main() {
     const int M = 16, N = 16, K = 16;
     const int size = M * N;
     
-    // Allocate host memory - use __hip_bfloat16 directly
-    std::vector<__hip_bfloat16> h_A(size);
-    std::vector<__hip_bfloat16> h_B(size);
+    // Allocate host memory - use hip_bfloat16 to match fragment type
+    std::vector<hip_bfloat16> h_A(size);
+    std::vector<hip_bfloat16> h_B(size);
     std::vector<float> h_C(size);
     std::vector<float> h_C_ref(size);
     
@@ -65,14 +66,14 @@ int main() {
     std::cout << "Initializing BF16 matrices...\n";
     for (int i = 0; i < M; i++) {
         for (int j = 0; j < K; j++) {
-            h_A[i * K + j] = __float2bfloat16((i + j) * 0.1f);
+            h_A[i * K + j] = hip_bfloat16((i + j) * 0.1f);
         }
     }
     
     // B matrix in col-major format
     for (int k = 0; k < K; k++) {
         for (int n = 0; n < N; n++) {
-            h_B[n * K + k] = __float2bfloat16((k - n) * 0.1f);
+            h_B[n * K + k] = hip_bfloat16((k - n) * 0.1f);
         }
     }
     
@@ -81,7 +82,7 @@ int main() {
     for (int i = 0; i < 4; i++) {
         for (int j = 0; j < 4; j++) {
             std::cout << std::setw(6) << std::fixed << std::setprecision(2) 
-                      << __bfloat162float(h_A[i * K + j]) << " ";
+                      << static_cast<float>(h_A[i * K + j]) << " ";
         }
         std::cout << "\n";
     }
@@ -101,16 +102,16 @@ int main() {
     }
     std::cout << "\n";
     
-    // Allocate device memory
-    __hip_bfloat16 *d_A, *d_B;
+    // Allocate device memory - use hip_bfloat16 to match fragment type
+    hip_bfloat16 *d_A, *d_B;
     float *d_C;
-    hipMalloc(&d_A, size * sizeof(__hip_bfloat16));
-    hipMalloc(&d_B, size * sizeof(__hip_bfloat16));
+    hipMalloc(&d_A, size * sizeof(hip_bfloat16));
+    hipMalloc(&d_B, size * sizeof(hip_bfloat16));
     hipMalloc(&d_C, size * sizeof(float));
     
     // Copy data to device
-    hipMemcpy(d_A, h_A.data(), size * sizeof(__hip_bfloat16), hipMemcpyHostToDevice);
-    hipMemcpy(d_B, h_B.data(), size * sizeof(__hip_bfloat16), hipMemcpyHostToDevice);
+    hipMemcpy(d_A, h_A.data(), size * sizeof(hip_bfloat16), hipMemcpyHostToDevice);
+    hipMemcpy(d_B, h_B.data(), size * sizeof(hip_bfloat16), hipMemcpyHostToDevice);
     
     // Launch kernel
     std::cout << "Testing BF16×BF16 → FP32 MMA...\n";
