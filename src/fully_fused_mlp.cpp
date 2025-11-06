@@ -75,11 +75,11 @@ __device__ void threadblock_layer(Activation activation, __half* __restrict__ ac
 	// is achieved by interpreting the memory in row_major instead of col_major order.
 	using weights_layout_t = typename std::conditional<BACKWARD, row_major, col_major>::type;
 
-	// v27: FP16 input, FP32 accumulator
-	// AMD Matrix Core native FP32 accumulation
+	// v19/v34: Use OUT_T for accumulator (same as CUDA)
+	// This allows matching CUDA's behavior exactly
 	using MatrixA = fragment<matrix_a, 16, 16, 16, __half, row_major>;
 	using MatrixB = fragment<matrix_b, 16, 16, 16, __half, weights_layout_t>;
-	using Accumulator = fragment<accumulator, 16, 16, 16, float>;
+	using Accumulator = fragment<accumulator, 16, 16, 16, OUT_T>;
 
 	MatrixA act_frag;
 	MatrixB weights_frag[N_BLOCKS];
@@ -120,39 +120,23 @@ __device__ void threadblock_layer(Activation activation, __half* __restrict__ ac
 			mma_sync(result_frag[l], act_frag, weights_frag[i], result_frag[l]);
 		}
 
-		// v27: Activation function in FP32 precision
+		// v19/v34: Activation function using OUT_T (same as CUDA)
 		if (BACKWARD) {
 			// Load the temporary forward matrix for the relu transfer
 			load_matrix_sync(act_frag, activation_aux + weights_col + l * 16 * WIDTH, WIDTH);
-			// v33: Test using warp_activation_backward instead of warp_activation_backward_mixed
-			warp_activation_backward<float>(activation, result_frag[l], act_frag, result_frag[l]);
+			warp_activation_backward<OUT_T>(activation, result_frag[l], act_frag, result_frag[l]);
 		} else {
-			warp_activation<float>(activation, result_frag[l], result_frag[l]);
+			warp_activation<OUT_T>(activation, result_frag[l], result_frag[l]);
 		}
 	}
 
 	// v19: Minimal synchronization
 	__syncthreads();
 
-	// v27: Convert FP32 accumulator to FP16 for storage
+	// v19/v34: Store directly (no conversion needed when OUT_T = __half)
 	TCNN_PRAGMA_UNROLL
 	for (int l = 0; l < N_ITERS; ++l) {
-		fragment<accumulator, 16, 16, 16, __half> result_frag_fp16;
-		for (int i = 0; i < result_frag[l].num_elements; ++i) {
-			result_frag_fp16.x[i] = __float2half(result_frag[l].x[i]);
-		}
-		store_matrix_sync(act_shmem + weights_col + l * 16 * (WIDTH + SKEW), result_frag_fp16, WIDTH + SKEW, mem_row_major);
-	}
-
-	// v27 Diagnostic: Print conversion values
-	if (blockIdx.x == 0 && threadIdx.x == 0 && threadIdx.y == 0 && !BACKWARD) {
-		printf("[v27 Diagnostic] Before store: result_frag[0].x[0] = %.6f (FP32)\n", 
-		       result_frag[0].x[0]);
-		
-		__syncthreads();
-		__half stored_val = act_shmem[weights_col];
-		printf("[v27 Diagnostic] After store: act_shmem[0] = %.6f (FP16)\n", 
-		       __half2float(stored_val));
+		store_matrix_sync(act_shmem + weights_col + l * 16 * (WIDTH + SKEW), result_frag[l], WIDTH + SKEW, mem_row_major);
 	}
 
 	if (out_intermediate_threadblock_this_layer != nullptr) {
@@ -261,8 +245,8 @@ __global__ void kernel_mlp_fused_backward(
 			fragment<matrix_a, 16, 16, 16, __half, row_major> forward_frag;
 			load_matrix_sync(forward_frag, forward + layer_stride * n_hidden_matmuls + weights_col + (elem_idx + l * 16) * WIDTH, WIDTH);
 
-			// v33: Test using warp_activation_backward instead of warp_activation_backward_mixed
-			warp_activation_backward<float>(ACTIVATION, result_frag[l], forward_frag, result_frag[l]);
+			// v27: Use mixed-precision backward activation (FP32 result, FP16 forward)
+			warp_activation_backward_mixed<float, __half>(ACTIVATION, result_frag[l], forward_frag, result_frag[l]);
 		}
 
 		__syncthreads();
