@@ -17,8 +17,9 @@ __global__ void test_bf16_mma_kernel(
     using namespace rocwmma;
     
     // v32: BF16 input fragments, FP32 accumulator
-    fragment<matrix_a, 16, 16, 16, __hip_bfloat16, row_major> a_frag;
-    fragment<matrix_b, 16, 16, 16, __hip_bfloat16, col_major> b_frag;
+    // NOTE: rocWMMA uses hip_bfloat16, not __hip_bfloat16
+    fragment<matrix_a, 16, 16, 16, hip_bfloat16, row_major> a_frag;
+    fragment<matrix_b, 16, 16, 16, hip_bfloat16, col_major> b_frag;
     fragment<accumulator, 16, 16, 16, float> c_frag;
     
     fill_fragment(c_frag, 0.0f);
