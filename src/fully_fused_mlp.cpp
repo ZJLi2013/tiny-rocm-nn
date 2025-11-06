@@ -144,16 +144,16 @@ __device__ void threadblock_layer(Activation activation, __half* __restrict__ ac
 		store_matrix_sync(act_shmem + weights_col + l * 16 * (WIDTH + SKEW), result_frag_fp16, WIDTH + SKEW, mem_row_major);
 	}
 
-	// // v27 Diagnostic: Print conversion values
-	// if (blockIdx.x == 0 && threadIdx.x == 0 && threadIdx.y == 0 && !BACKWARD) {
-	// 	printf("[v27 Diagnostic] Before store: result_frag[0].x[0] = %.6f (FP32)\n", 
-	// 	       result_frag[0].x[0]);
+	// v27 Diagnostic: Print conversion values
+	if (blockIdx.x == 0 && threadIdx.x == 0 && threadIdx.y == 0 && !BACKWARD) {
+		printf("[v27 Diagnostic] Before store: result_frag[0].x[0] = %.6f (FP32)\n", 
+		       result_frag[0].x[0]);
 		
-	// 	__syncthreads();
-	// 	__half stored_val = act_shmem[weights_col];
-	// 	printf("[v27 Diagnostic] After store: act_shmem[0] = %.6f (FP16)\n", 
-	// 	       __half2float(stored_val));
-	// }
+		__syncthreads();
+		__half stored_val = act_shmem[weights_col];
+		printf("[v27 Diagnostic] After store: act_shmem[0] = %.6f (FP16)\n", 
+		       __half2float(stored_val));
+	}
 
 	if (out_intermediate_threadblock_this_layer != nullptr) {
 		__syncthreads();
