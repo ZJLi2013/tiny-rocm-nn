@@ -124,8 +124,8 @@ __device__ void threadblock_layer(Activation activation, __half* __restrict__ ac
 		if (BACKWARD) {
 			// Load the temporary forward matrix for the relu transfer
 			load_matrix_sync(act_frag, activation_aux + weights_col + l * 16 * WIDTH, WIDTH);
-			// v27: Mixed-precision backward activation
-			warp_activation_backward_mixed<float, __half>(activation, result_frag[l], act_frag, result_frag[l]);
+			// v33: Test using warp_activation_backward instead of warp_activation_backward_mixed
+			warp_activation_backward<float>(activation, result_frag[l], act_frag, result_frag[l]);
 		} else {
 			warp_activation<float>(activation, result_frag[l], result_frag[l]);
 		}
@@ -144,16 +144,16 @@ __device__ void threadblock_layer(Activation activation, __half* __restrict__ ac
 		store_matrix_sync(act_shmem + weights_col + l * 16 * (WIDTH + SKEW), result_frag_fp16, WIDTH + SKEW, mem_row_major);
 	}
 
-	// v27 Diagnostic: Print conversion values
-	if (blockIdx.x == 0 && threadIdx.x == 0 && threadIdx.y == 0 && !BACKWARD) {
-		printf("[v27 Diagnostic] Before store: result_frag[0].x[0] = %.6f (FP32)\n", 
-		       result_frag[0].x[0]);
+	// // v27 Diagnostic: Print conversion values
+	// if (blockIdx.x == 0 && threadIdx.x == 0 && threadIdx.y == 0 && !BACKWARD) {
+	// 	printf("[v27 Diagnostic] Before store: result_frag[0].x[0] = %.6f (FP32)\n", 
+	// 	       result_frag[0].x[0]);
 		
-		__syncthreads();
-		__half stored_val = act_shmem[weights_col];
-		printf("[v27 Diagnostic] After store: act_shmem[0] = %.6f (FP16)\n", 
-		       __half2float(stored_val));
-	}
+	// 	__syncthreads();
+	// 	__half stored_val = act_shmem[weights_col];
+	// 	printf("[v27 Diagnostic] After store: act_shmem[0] = %.6f (FP16)\n", 
+	// 	       __half2float(stored_val));
+	// }
 
 	if (out_intermediate_threadblock_this_layer != nullptr) {
 		__syncthreads();
@@ -261,8 +261,8 @@ __global__ void kernel_mlp_fused_backward(
 			fragment<matrix_a, 16, 16, 16, __half, row_major> forward_frag;
 			load_matrix_sync(forward_frag, forward + layer_stride * n_hidden_matmuls + weights_col + (elem_idx + l * 16) * WIDTH, WIDTH);
 
-			// v27: Use mixed-precision backward activation (FP32 result, FP16 forward)
-			warp_activation_backward_mixed<float, __half>(ACTIVATION, result_frag[l], forward_frag, result_frag[l]);
+			// v33: Test using warp_activation_backward instead of warp_activation_backward_mixed
+			warp_activation_backward<float>(ACTIVATION, result_frag[l], forward_frag, result_frag[l]);
 		}
 
 		__syncthreads();
