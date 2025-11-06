@@ -58,7 +58,7 @@ __device__ void sh2gmem(__half* device_mem, const __half* __restrict__ shmem, in
 }
 
 template <int WIDTH, int N_ITERS, typename OUT_T, bool BACKWARD=false>
-__device__ void threadblock_layer(Activation activation, __half* __restrict__ act_shmem, const __half* __restrict__ weights_this_layer, OUT_T* __restrict__ out_intermediate_threadblock_this_layer, const OUT_T* __restrict__ activation_aux = nullptr) {
+__device__ void threadblock_layer(Activation activation, float* __restrict__ act_shmem, const __half* __restrict__ weights_this_layer, OUT_T* __restrict__ out_intermediate_threadblock_this_layer, const OUT_T* __restrict__ activation_aux = nullptr) {
 	// act_shmem contains the intermediate activations (shared memory) of the thread block's chunk of the batch.
 	//           Can be forward activations or backward activations, depending on caller.
 	// weights_this_layer points to the weight matrix of the current layer.
@@ -75,13 +75,11 @@ __device__ void threadblock_layer(Activation activation, __half* __restrict__ ac
 	// is achieved by interpreting the memory in row_major instead of col_major order.
 	using weights_layout_t = typename std::conditional<BACKWARD, row_major, col_major>::type;
 
-	// Fragments
-	using MatrixA = fragment<matrix_a, 16, 16, 16, __half, row_major>;
-	using MatrixB = fragment<matrix_b, 16, 16, 16, __half, weights_layout_t>;
-	
-	// v27: Use FP32 accumulator to leverage AMD Matrix Core's native FP32 accumulation capability
+	// v31: Full FP32 pipeline - use FP32 for all fragments
+	// AMD Matrix Core supports FP32×FP32 → FP32 natively
 	// Reference: https://gpuopen.com/learn/amd-lab-notes/amd-lab-notes-matrix-cores-readme/
-	// CDNA2/CDNA3 supports: Input A/B (FP16) × Accumulator C/D (FP32)
+	using MatrixA = fragment<matrix_a, 16, 16, 16, float, row_major>;
+	using MatrixB = fragment<matrix_b, 16, 16, 16, float, weights_layout_t>;
 	using Accumulator = fragment<accumulator, 16, 16, 16, float>;
 
 	MatrixA act_frag;
@@ -117,18 +115,17 @@ __device__ void threadblock_layer(Activation activation, __half* __restrict__ ac
 
 		TCNN_PRAGMA_UNROLL
 		for (uint32_t i = 0; i < N_BLOCKS; ++i) {
-			// Load a chunk of intermediate activations from shared memory and multiply with chunk of weights
+			// v31: Load FP32 from shared memory, rocWMMA converts to FP32 fragment
 			load_matrix_sync(act_frag, act_shmem + 16 * i + (16 * l) * (WIDTH + SKEW), WIDTH + SKEW);
-			// v27: FP16×FP16 → FP32 accumulation (leveraging AMD Matrix Core hardware capability)
+			// v31: FP32×FP32 → FP32 MMA operation
 			mma_sync(result_frag[l], act_frag, weights_frag[i], result_frag[l]);
 		}
 
-		// v27: Activation function executed in FP32 precision for maximum numerical stability
+		// v31: Activation function in FP32 precision
 		if (BACKWARD) {
 			// Load the temporary forward matrix for the relu transfer
 			load_matrix_sync(act_frag, activation_aux + weights_col + l * 16 * WIDTH, WIDTH);
-			// v27: Use mixed-precision backward activation (FP32 result, FP16 forward)
-			warp_activation_backward_mixed<float, __half>(activation, result_frag[l], act_frag, result_frag[l]);
+			warp_activation_backward<float>(activation, result_frag[l], act_frag, result_frag[l]);
 		} else {
 			warp_activation<float>(activation, result_frag[l], result_frag[l]);
 		}
@@ -137,9 +134,7 @@ __device__ void threadblock_layer(Activation activation, __half* __restrict__ ac
 	// v19: Minimal synchronization - only sync after all iterations complete
 	__syncthreads();
 
-	// v30: Let rocWMMA handle FP32→FP16 conversion automatically
-	// Removing manual conversion to avoid fragment structure corruption and extra rounding errors
-	// Reference: https://github.com/ROCm/rocWMMA/issues/604
+	// v31: Store FP32 results directly to FP32 shared memory (no conversion!)
 	TCNN_PRAGMA_UNROLL
 	for (int l = 0; l < N_ITERS; ++l) {
 		store_matrix_sync(act_shmem + weights_col + l * 16 * (WIDTH + SKEW), result_frag[l], WIDTH + SKEW, mem_row_major);
@@ -257,10 +252,14 @@ __global__ void kernel_mlp_fused_backward(
 
 		__syncthreads();
 
-		// v30: Let rocWMMA handle FP32→FP16 conversion automatically
+		// v27: Convert FP32 gradients to FP16 for storage
 		TCNN_PRAGMA_UNROLL
 		for (int l = 0; l < N_ITERS; ++l) {
-			store_matrix_sync(act_shmem + weights_col + (16 * l) * (WIDTH + SKEW), result_frag[l], WIDTH + SKEW, mem_row_major);
+			fragment<accumulator, 16, 16, 16, __half> result_frag_fp16;
+			for (int i = 0; i < result_frag[l].num_elements; ++i) {
+				result_frag_fp16.x[i] = __float2half(result_frag[l].x[i]);
+			}
+			store_matrix_sync(act_shmem + weights_col + (16 * l) * (WIDTH + SKEW), result_frag_fp16, WIDTH + SKEW, mem_row_major);
 		}
 
 		__syncthreads();
@@ -444,10 +443,14 @@ __device__ void threadblock_input_layer_forward_dynamic(Activation activation, _
 		__syncthreads();
 	}
 
-	// v30: Let rocWMMA handle FP32→FP16 conversion automatically
+	// v27: Convert FP32 results to FP16 for storage
 	TCNN_PRAGMA_UNROLL
 	for (int l = 0; l < N_ITERS; ++l) {
-		store_matrix_sync(act_shmem + weights_col + (16 * l) * (WIDTH + SKEW), result_frag[l], WIDTH + SKEW, mem_row_major);
+		fragment<accumulator, 16, 16, 16, __half> result_frag_fp16;
+		for (int i = 0; i < result_frag[l].num_elements; ++i) {
+			result_frag_fp16.x[i] = __float2half(result_frag[l].x[i]);
+		}
+		store_matrix_sync(act_shmem + weights_col + (16 * l) * (WIDTH + SKEW), result_frag_fp16, WIDTH + SKEW, mem_row_major);
 	}
 
 	if (out_intermediate_threadblock_this_layer != nullptr) {
@@ -513,11 +516,16 @@ __device__ void threadblock_last_layer_forward(Activation activation, __half* __
 		// v27: Activation in FP32 precision
 		warp_activation<float>(activation, result_frag, result_frag);
 
-		// v30: Let rocWMMA handle FP32→FP16 conversion automatically
+		// v27: Convert to FP16 for output
+		fragment<accumulator, 16, 16, 16, __half> result_frag_fp16;
+		for (int i = 0; i < result_frag.num_elements; ++i) {
+			result_frag_fp16.x[i] = __float2half(result_frag.x[i]);
+		}
+
 		if (output_layout == mem_row_major) {
-			store_matrix_sync(out + idx * 16 * output_stride, result_frag, output_stride, output_layout);
+			store_matrix_sync(out + idx * 16 * output_stride, result_frag_fp16, output_stride, output_layout);
 		} else {
-			store_matrix_sync(out + idx * 16, result_frag, output_stride, output_layout);
+			store_matrix_sync(out + idx * 16, result_frag_fp16, output_stride, output_layout);
 		}
 	}
 }
