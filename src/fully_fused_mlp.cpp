@@ -137,15 +137,12 @@ __device__ void threadblock_layer(Activation activation, __half* __restrict__ ac
 	// v19: Minimal synchronization - only sync after all iterations complete
 	__syncthreads();
 
-	// v27: Convert FP32 accumulator results back to FP16 for storage
-	// This controlled conversion point maximizes precision while maintaining FP16 storage
+	// v30: Let rocWMMA handle FP32→FP16 conversion automatically
+	// Removing manual conversion to avoid fragment structure corruption and extra rounding errors
+	// Reference: https://github.com/ROCm/rocWMMA/issues/604
 	TCNN_PRAGMA_UNROLL
 	for (int l = 0; l < N_ITERS; ++l) {
-		fragment<accumulator, 16, 16, 16, __half> result_frag_fp16;
-		for (int i = 0; i < result_frag[l].num_elements; ++i) {
-			result_frag_fp16.x[i] = __float2half(result_frag[l].x[i]);
-		}
-		store_matrix_sync(act_shmem + weights_col + l * 16 * (WIDTH + SKEW), result_frag_fp16, WIDTH + SKEW, mem_row_major);
+		store_matrix_sync(act_shmem + weights_col + l * 16 * (WIDTH + SKEW), result_frag[l], WIDTH + SKEW, mem_row_major);
 	}
 
 	if (out_intermediate_threadblock_this_layer != nullptr) {
@@ -260,14 +257,10 @@ __global__ void kernel_mlp_fused_backward(
 
 		__syncthreads();
 
-		// v27: Convert FP32 gradients to FP16 for storage
+		// v30: Let rocWMMA handle FP32→FP16 conversion automatically
 		TCNN_PRAGMA_UNROLL
 		for (int l = 0; l < N_ITERS; ++l) {
-			fragment<accumulator, 16, 16, 16, __half> result_frag_fp16;
-			for (int i = 0; i < result_frag[l].num_elements; ++i) {
-				result_frag_fp16.x[i] = __float2half(result_frag[l].x[i]);
-			}
-			store_matrix_sync(act_shmem + weights_col + (16 * l) * (WIDTH + SKEW), result_frag_fp16, WIDTH + SKEW, mem_row_major);
+			store_matrix_sync(act_shmem + weights_col + (16 * l) * (WIDTH + SKEW), result_frag[l], WIDTH + SKEW, mem_row_major);
 		}
 
 		__syncthreads();
@@ -451,14 +444,10 @@ __device__ void threadblock_input_layer_forward_dynamic(Activation activation, _
 		__syncthreads();
 	}
 
-	// v27: Convert FP32 results to FP16 for storage
+	// v30: Let rocWMMA handle FP32→FP16 conversion automatically
 	TCNN_PRAGMA_UNROLL
 	for (int l = 0; l < N_ITERS; ++l) {
-		fragment<accumulator, 16, 16, 16, __half> result_frag_fp16;
-		for (int i = 0; i < result_frag[l].num_elements; ++i) {
-			result_frag_fp16.x[i] = __float2half(result_frag[l].x[i]);
-		}
-		store_matrix_sync(act_shmem + weights_col + (16 * l) * (WIDTH + SKEW), result_frag_fp16, WIDTH + SKEW, mem_row_major);
+		store_matrix_sync(act_shmem + weights_col + (16 * l) * (WIDTH + SKEW), result_frag[l], WIDTH + SKEW, mem_row_major);
 	}
 
 	if (out_intermediate_threadblock_this_layer != nullptr) {
@@ -524,16 +513,11 @@ __device__ void threadblock_last_layer_forward(Activation activation, __half* __
 		// v27: Activation in FP32 precision
 		warp_activation<float>(activation, result_frag, result_frag);
 
-		// v27: Convert to FP16 for output
-		fragment<accumulator, 16, 16, 16, __half> result_frag_fp16;
-		for (int i = 0; i < result_frag.num_elements; ++i) {
-			result_frag_fp16.x[i] = __float2half(result_frag.x[i]);
-		}
-
+		// v30: Let rocWMMA handle FP32→FP16 conversion automatically
 		if (output_layout == mem_row_major) {
-			store_matrix_sync(out + idx * 16 * output_stride, result_frag_fp16, output_stride, output_layout);
+			store_matrix_sync(out + idx * 16 * output_stride, result_frag, output_stride, output_layout);
 		} else {
-			store_matrix_sync(out + idx * 16, result_frag_fp16, output_stride, output_layout);
+			store_matrix_sync(out + idx * 16, result_frag, output_stride, output_layout);
 		}
 	}
 }
