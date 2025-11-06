@@ -78,7 +78,8 @@ __device__ void check_shmem_input(const __half* __restrict__ act_shmem, const ch
 		int nan_count = 0;
 		
 		// Sample first 256 elements for efficiency
-		const int SAMPLE_SIZE = min(256, 16 * N_ITERS * (WIDTH + SKEW));
+		const uint32_t max_size = 16u * N_ITERS * (WIDTH + SKEW);
+		const int SAMPLE_SIZE = (max_size < 256u) ? max_size : 256u;
 		
 		for (int i = 0; i < SAMPLE_SIZE; i++) {
 			float val = __half2float(act_shmem[i]);
