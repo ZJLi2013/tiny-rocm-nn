@@ -7,25 +7,31 @@
 
 // Test FP32×FP32 → FP32 matrix multiplication using rocWMMA
 // This is critical for v31 implementation
+// NOTE: FP32 uses different M×N×K than FP16!
+// FP32: 16×16×4 (not 16×16×16)
 __global__ void test_fp32_input_mma_kernel(
-    const float* A,  // FP32 input matrix A (row-major)
-    const float* B,  // FP32 input matrix B (col-major)
-    float* C         // FP32 output matrix C (row-major)
+    const float* A,  // FP32 input matrix A (row-major) 16×4
+    const float* B,  // FP32 input matrix B (col-major) 4×16
+    float* C         // FP32 output matrix C (row-major) 16×16
 ) {
     using namespace rocwmma;
     
-    // v31: Test FP32 fragments for all matrices
-    fragment<matrix_a, 16, 16, 16, float, row_major> a_frag;
-    fragment<matrix_b, 16, 16, 16, float, col_major> b_frag;
-    fragment<accumulator, 16, 16, 16, float> c_frag;
+    // v31: Test FP32 fragments - NOTE: K=4 for FP32!
+    fragment<matrix_a, 16, 16, 4, float, row_major> a_frag;
+    fragment<matrix_b, 16, 16, 4, float, col_major> b_frag;
+    fragment<accumulator, 16, 16, 4, float> c_frag;
     
     fill_fragment(c_frag, 0.0f);
     
-    load_matrix_sync(a_frag, A, 16);
-    load_matrix_sync(b_frag, B, 16);
-    
-    // FP32×FP32 → FP32 MMA
-    mma_sync(c_frag, a_frag, b_frag, c_frag);
+    // For 16×16 output, we need to do 4 iterations of 16×16×4 MMA
+    // to accumulate the full 16×16×16 multiplication
+    for (int k_block = 0; k_block < 4; ++k_block) {
+        load_matrix_sync(a_frag, A + k_block * 4, 16);  // Load 16×4 block
+        load_matrix_sync(b_frag, B + k_block * 4, 16);  // Load 4×16 block
+        
+        // FP32×FP32 → FP32 MMA (16×16×4)
+        mma_sync(c_frag, a_frag, b_frag, c_frag);
+    }
     
     store_matrix_sync(C, c_frag, 16, mem_row_major);
 }
@@ -48,6 +54,8 @@ void cpu_matmul_fp32(const std::vector<float>& A, const std::vector<float>& B,
 
 int main() {
     std::cout << "=== rocWMMA FP32×FP32 → FP32 Test (v31 Validation) ===\n\n";
+    std::cout << "NOTE: FP32 uses 16×16×4 blocks (not 16×16×16 like FP16)\n";
+    std::cout << "We will do 4 iterations to compute full 16×16×16 result\n\n";
     
     const int M = 16, N = 16, K = 16;
     const int size = M * N;
