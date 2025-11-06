@@ -217,8 +217,8 @@ __global__ void kernel_mlp_fused_backward(
 		// Fragments in registers
 		fragment<matrix_a, 16, 16, 16, __half, OUTPUT_LAYOUT> act_frag;
 		fragment<matrix_b, 16, 16, 16, __half, row_major> weights_frag;
-		// v27: Use FP32 accumulator in backward pass as well
-		fragment<accumulator, 16, 16, 16, float> result_frag[N_ITERS];
+		// v19/v34: Use __half accumulator (same as CUDA)
+		fragment<accumulator, 16, 16, 16, __half> result_frag[N_ITERS];
 
 		// Load the relevant chunk of the last layer's weight matrix from global memory into registers
 		const uint32_t weights_col = 16 * wi;
@@ -245,20 +245,16 @@ __global__ void kernel_mlp_fused_backward(
 			fragment<matrix_a, 16, 16, 16, __half, row_major> forward_frag;
 			load_matrix_sync(forward_frag, forward + layer_stride * n_hidden_matmuls + weights_col + (elem_idx + l * 16) * WIDTH, WIDTH);
 
-			// v27: Use mixed-precision backward activation (FP32 result, FP16 forward)
-			warp_activation_backward_mixed<float, __half>(ACTIVATION, result_frag[l], forward_frag, result_frag[l]);
+			// v19/v34: Use warp_activation_backward<__half> (same as CUDA)
+			warp_activation_backward<__half>(ACTIVATION, result_frag[l], forward_frag, result_frag[l]);
 		}
 
 		__syncthreads();
 
-		// v27: Convert FP32 gradients to FP16 for storage
+		// v19/v34: Store directly (no conversion needed)
 		TCNN_PRAGMA_UNROLL
 		for (int l = 0; l < N_ITERS; ++l) {
-			fragment<accumulator, 16, 16, 16, __half> result_frag_fp16;
-			for (int i = 0; i < result_frag[l].num_elements; ++i) {
-				result_frag_fp16.x[i] = __float2half(result_frag[l].x[i]);
-			}
-			store_matrix_sync(act_shmem + weights_col + (16 * l) * (WIDTH + SKEW), result_frag_fp16, WIDTH + SKEW, mem_row_major);
+			store_matrix_sync(act_shmem + weights_col + (16 * l) * (WIDTH + SKEW), result_frag[l], WIDTH + SKEW, mem_row_major);
 		}
 
 		__syncthreads();
@@ -361,8 +357,8 @@ __device__ void threadblock_input_layer_forward_dynamic(Activation activation, _
 	// Fragments: small tiles of matrices 
 	fragment<matrix_a, 16, 16, 16, __half, INPUT_LAYOUT> act_frag;
 	fragment<matrix_b, 16, 16, 16, __half, col_major> weights_frag;
-	// v27: Use FP32 accumulator for input layer as well
-	fragment<accumulator, 16, 16, 16, float> result_frag[N_ITERS];
+	// v19/v34: Use OUT_T accumulator (same as CUDA)
+	fragment<accumulator, 16, 16, 16, OUT_T> result_frag[N_ITERS];
 
 	// Indices
 	const uint32_t li = threadIdx.x; // index in wave ("lane index")
@@ -434,22 +430,18 @@ __device__ void threadblock_input_layer_forward_dynamic(Activation activation, _
 			__syncthreads();
 		}
 
-		// v27: Activation in FP32 precision
-		warp_activation<float>(activation, result_frag[l], result_frag[l]);
+		// v19/v34: Activation using OUT_T (same as CUDA)
+		warp_activation<OUT_T>(activation, result_frag[l], result_frag[l]);
 	}
 
 	if (std::is_same<INPUT_LAYOUT, col_major>::value) {
 		__syncthreads();
 	}
 
-	// v27: Convert FP32 results to FP16 for storage
+	// v19/v34: Store directly (no conversion needed when OUT_T = __half)
 	TCNN_PRAGMA_UNROLL
 	for (int l = 0; l < N_ITERS; ++l) {
-		fragment<accumulator, 16, 16, 16, __half> result_frag_fp16;
-		for (int i = 0; i < result_frag[l].num_elements; ++i) {
-			result_frag_fp16.x[i] = __float2half(result_frag[l].x[i]);
-		}
-		store_matrix_sync(act_shmem + weights_col + (16 * l) * (WIDTH + SKEW), result_frag_fp16, WIDTH + SKEW, mem_row_major);
+		store_matrix_sync(act_shmem + weights_col + (16 * l) * (WIDTH + SKEW), result_frag[l], WIDTH + SKEW, mem_row_major);
 	}
 
 	if (out_intermediate_threadblock_this_layer != nullptr) {
@@ -479,8 +471,8 @@ __device__ void threadblock_last_layer_forward(Activation activation, __half* __
 	// Fragments
 	fragment<matrix_a, 16, 16, 16, __half, row_major> act_frag;
 	fragment<matrix_b, 16, 16, 16, __half, col_major> weights_frag[N_BLOCKS];
-	// v27: Use FP32 accumulator for last layer
-	fragment<accumulator, 16, 16, 16, float> result_frag;
+	// v19/v34: Use OUT_T accumulator (same as CUDA)
+	fragment<accumulator, 16, 16, 16, OUT_T> result_frag;
 
 	// Indices
 	const uint32_t li = threadIdx.x; // index in wave ("lane index")
@@ -512,19 +504,14 @@ __device__ void threadblock_last_layer_forward(Activation activation, __half* __
 			mma_sync(result_frag, act_frag, weights_frag[i], result_frag);
 		}
 
-		// v27: Activation in FP32 precision
-		warp_activation<float>(activation, result_frag, result_frag);
+		// v19/v34: Activation using OUT_T (same as CUDA)
+		warp_activation<OUT_T>(activation, result_frag, result_frag);
 
-		// v27: Convert to FP16 for output
-		fragment<accumulator, 16, 16, 16, __half> result_frag_fp16;
-		for (int i = 0; i < result_frag.num_elements; ++i) {
-			result_frag_fp16.x[i] = __float2half(result_frag.x[i]);
-		}
-
+		// v19/v34: Store directly (no conversion needed when OUT_T = __half)
 		if (output_layout == mem_row_major) {
-			store_matrix_sync(out + idx * 16 * output_stride, result_frag_fp16, output_stride, output_layout);
+			store_matrix_sync(out + idx * 16 * output_stride, result_frag, output_stride, output_layout);
 		} else {
-			store_matrix_sync(out + idx * 16, result_frag_fp16, output_stride, output_layout);
+			store_matrix_sync(out + idx * 16, result_frag, output_stride, output_layout);
 		}
 	}
 }
