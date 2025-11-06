@@ -42,6 +42,13 @@ namespace tcnn {
 // ROCm: AMD GPU wave size (64 threads per wave, vs NVIDIA's 32 threads per warp)
 constexpr uint32_t WAVE_SIZE = 64;
 
+// v32: Global diagnostic counters for anomaly detection
+__device__ uint32_t g_nan_detected = 0;
+__device__ uint32_t g_inf_detected = 0;
+__device__ uint32_t g_large_val_detected = 0;
+__device__ uint32_t g_first_nan_step = 0xFFFFFFFF;
+__device__ uint32_t g_current_step = 0;
+
 void check_shmem_error(hipError_t error) {
 	if (error != hipSuccess) {
 		throw std::runtime_error{"FullyFusedMLP: insufficient shared memory available on the GPU. Reduce `n_neurons` to fit available shared memory."};
@@ -55,6 +62,48 @@ __device__ void sh2gmem(__half* device_mem, const __half* __restrict__ shmem, in
 		device_mem[tid] = shmem[tid];
 	}
 	__syncthreads();
+}
+
+// v32: Check shared memory for anomalies before computation
+template <int WIDTH, int N_ITERS>
+__device__ void check_shmem_input(const __half* __restrict__ act_shmem, const char* layer_name, uint32_t layer_idx) {
+	// Only first thread of first block checks
+	if (blockIdx.x == 0 && threadIdx.x == 0 && threadIdx.y == 0) {
+		constexpr uint32_t SKEW = WIDTH % 16 == 0 ? 8 : 0;
+		constexpr float THRESHOLD = 100.0f;
+		
+		bool has_nan = false;
+		bool has_inf = false;
+		float max_val = 0.0f;
+		int nan_count = 0;
+		
+		// Sample first 256 elements for efficiency
+		const int SAMPLE_SIZE = min(256, 16 * N_ITERS * (WIDTH + SKEW));
+		
+		for (int i = 0; i < SAMPLE_SIZE; i++) {
+			float val = __half2float(act_shmem[i]);
+			if (isnan(val)) {
+				has_nan = true;
+				nan_count++;
+			}
+			if (isinf(val)) has_inf = true;
+			max_val = fmaxf(max_val, fabsf(val));
+		}
+		
+		// Only print if anomaly detected
+		if (has_nan || has_inf || max_val > THRESHOLD) {
+			printf("[v32 ALERT] %s[%u]: NaN=%d(cnt=%d), Inf=%d, max=%.2f\n",
+			       layer_name, layer_idx, has_nan, nan_count, has_inf, max_val);
+			
+			// Update global counters
+			if (has_nan) {
+				atomicAdd(&g_nan_detected, 1);
+				atomicMin(&g_first_nan_step, g_current_step);
+			}
+			if (has_inf) atomicAdd(&g_inf_detected, 1);
+			if (max_val > THRESHOLD) atomicAdd(&g_large_val_detected, 1);
+		}
+	}
 }
 
 template <int WIDTH, int N_ITERS, typename OUT_T, bool BACKWARD=false>
@@ -574,6 +623,12 @@ __global__ void kernel_mlp_fused(const Activation output_activation, const __hal
 		// If the input has the same width & layout as the hidden layers, we can simply use the network's regular layer routine (with static size)
 		// instead of using the slower dynamic input layer routine.
 		threadblock_load_input_static<WIDTH, N_ITERS>(act_shmem, input + elem_idx * WIDTH);
+		
+		// v32: Check input after loading into shmem
+		if (!INFERENCE) {
+			check_shmem_input<WIDTH, N_ITERS>(act_shmem, "FirstLayer", 0);
+		}
+		
 		threadblock_layer<WIDTH, N_ITERS, OUT_T>(ACTIVATION, act_shmem, weights, !INFERENCE ? (out_intermediate + elem_idx * WIDTH) : nullptr);
 	}
 
@@ -583,6 +638,10 @@ __global__ void kernel_mlp_fused(const Activation output_activation, const __hal
 
 	// Hidden layers
 	for (uint32_t k = 0; k < n_hidden_matmuls; ++k) {
+		// v32: Check input before each hidden layer
+		if (!INFERENCE) {
+			check_shmem_input<WIDTH, N_ITERS>(act_shmem, "Hidden", k);
+		}
 		threadblock_layer<WIDTH, N_ITERS, OUT_T>(ACTIVATION, act_shmem, weights + first_weights_stride + weights_stride * k, !INFERENCE ? (out_intermediate + layer_stride * (k + 1) + elem_idx * WIDTH) : nullptr);
 	}
 
@@ -593,6 +652,11 @@ __global__ void kernel_mlp_fused(const Activation output_activation, const __hal
 		}
 	} else if (out) {
 		// Last layer
+		// v32: Check input before last layer
+		if (!INFERENCE) {
+			check_shmem_input<WIDTH, N_ITERS>(act_shmem, "LastLayer", n_hidden_matmuls);
+		}
+		
 		if (output_layout == rocwmma::mem_row_major) {
 			threadblock_last_layer_forward<WIDTH, N_ITERS, OUT_T>(output_activation, act_shmem, weights + first_weights_stride + weights_stride * n_hidden_matmuls, out + elem_idx * output_stride, output_stride, output_layout);
 		} else {
