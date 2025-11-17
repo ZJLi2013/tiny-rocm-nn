@@ -103,7 +103,10 @@ void sample_matrix_stats(hipStream_t stream, const T* data, uint32_t m, uint32_t
 		float a = std::fabs(v);
 		if (a > max_abs) max_abs = a;
 	}
-	printf("  %s[%dx%d] stats: NaN=%zu Inf=%zu max=%.4f (sample=%u)\n", name, m, n, nan_count, inf_count, max_abs, sample_count);
+	// Only log when anomalies are detected to keep logs concise
+	if (nan_count > 0 || inf_count > 0) {
+		printf("  %s[%dx%d] stats: NaN=%zu Inf=%zu max=%.4f (sample=%u)\n", name, m, n, nan_count, inf_count, max_abs, sample_count);
+	}
 }
 #endif
 
