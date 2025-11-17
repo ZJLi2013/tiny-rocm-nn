@@ -479,29 +479,6 @@ __device__ void threadblock_input_layer_forward_dynamic(Activation activation, _
 
 			__syncthreads();
 
-			// v34: Sample staged input in shared memory for RM layout (block 0, l==0)
-			if (blockIdx.x == 0 && threadIdx.x == 0 && threadIdx.y == 0 && l == 0) {
-				const uint32_t n_elems_a_skewed = 16u * in_width + (16u * INPUT_SKEW);
-				const uint32_t SAMPLE_SIZE = (n_elems_a_skewed < 256u) ? n_elems_a_skewed : 256u;
-
-				bool has_nan = false;
-				bool has_inf = false;
-				float max_val = 0.0f;
-				int nan_count = 0;
-
-				for (uint32_t i = 0; i < SAMPLE_SIZE; ++i) {
-					float val = __half2float(act_shmem[i]);
-					if (isnan(val)) { has_nan = true; nan_count++; }
-					if (isinf(val)) { has_inf = true; }
-					max_val = fmaxf(max_val, fabsf(val));
-				}
-
-				if (has_nan || has_inf) {
-					printf("[v34 INPUT RM] NaN=%d(cnt=%d), Inf=%d, max=%.2f\n", has_nan, nan_count, has_inf, max_val);
-					if (has_nan) { atomicAdd(&g_nan_detected, 1); atomicMin(&g_first_nan_step, g_current_step); }
-					if (has_inf) { atomicAdd(&g_inf_detected, 1); }
-				}
-			}
 		}
 
 
@@ -534,28 +511,6 @@ __device__ void threadblock_input_layer_forward_dynamic(Activation activation, _
 	if (std::is_same<INPUT_LAYOUT, col_major>::value) {
 		__syncthreads();
 
-		// v34: Sample input global memory for CM layout (block 0 only)
-		if (blockIdx.x == 0 && threadIdx.x == 0 && threadIdx.y == 0) {
-			const uint32_t SAMPLE_SIZE = ((batch_size * in_width) < 256u) ? (batch_size * in_width) : 256u;
-
-			bool has_nan = false;
-			bool has_inf = false;
-			float max_val = 0.0f;
-			int nan_count = 0;
-
-			for (uint32_t i = 0; i < SAMPLE_SIZE; ++i) {
-				float val = __half2float(input_threadblock[i]);
-				if (isnan(val)) { has_nan = true; nan_count++; }
-				if (isinf(val)) { has_inf = true; }
-				max_val = fmaxf(max_val, fabsf(val));
-			}
-
-			if (has_nan || has_inf) {
-				printf("[v34 INPUT CM] NaN=%d(cnt=%d), Inf=%d, max=%.2f\n", has_nan, nan_count, has_inf, max_val);
-				if (has_nan) { atomicAdd(&g_nan_detected, 1); atomicMin(&g_first_nan_step, g_current_step); }
-				if (has_inf) { atomicAdd(&g_inf_detected, 1); }
-			}
-		}
 	}
 
 	// v19/v34: Store directly (no conversion needed when OUT_T = __half)
@@ -564,10 +519,6 @@ __device__ void threadblock_input_layer_forward_dynamic(Activation activation, _
 		store_matrix_sync(act_shmem + weights_col + (16 * l) * (WIDTH + SKEW), result_frag[l], WIDTH + SKEW, mem_row_major);
 	}
 
-	// v34: Check InputLayer output in shared memory
-	if (blockIdx.x == 0 && threadIdx.x == 0 && threadIdx.y == 0) {
-		check_shmem_input<WIDTH, N_ITERS>(act_shmem, "InputLayer_Out", 0);
-	}
 
 	if (out_intermediate_threadblock_this_layer != nullptr) {
 		__syncthreads();
