@@ -137,33 +137,6 @@ void dump_binary(const char* filename, const std::vector<T>& buf) {
 	fclose(f);
 }
 
-// Minimal metadata dump to accompany tensor dumps
-inline void dump_meta(const char* filename, const char* tag,
-	int m, int n, int k,
-	hipblasOperation_t op_a, hipblasOperation_t op_b,
-	int lda, int ldb, int ldc,
-	float alpha, float beta,
-	const void* A_ptr, const void* B_ptr, const void* C_ptr,
-	hipblasComputeType_t compute_type, hipDataType dtype, hipblasGemmAlgo_t algo
-) {
-	const char* op_name_a = (op_a == HIPBLAS_OP_N ? "N" : (op_a == HIPBLAS_OP_T ? "T" : "C"));
-	const char* op_name_b = (op_b == HIPBLAS_OP_N ? "N" : (op_b == HIPBLAS_OP_T ? "T" : "C"));
-	const char* dtype_name = (dtype == HIPBLAS_R_32F ? "FP32" : (dtype == HIPBLAS_R_16F ? "FP16" : "UNKNOWN"));
-
-	FILE* f = fopen(filename, "w");
-	if (!f) {
-		printf("  [meta] fopen failed: %s\n", filename);
-		return;
-	}
-	fprintf(f, "tag=%s\n", tag);
-	fprintf(f, "m=%d n=%d k=%d\n", m, n, k);
-	fprintf(f, "op_a=%s op_b=%s\n", op_name_a, op_name_b);
-	fprintf(f, "lda=%d ldb=%d ldc=%d\n", lda, ldb, ldc);
-	fprintf(f, "alpha=%.8f beta=%.8f\n", alpha, beta);
-	fprintf(f, "A_ptr=%p B_ptr=%p C_ptr=%p\n", A_ptr, B_ptr, C_ptr);
-	fprintf(f, "compute_type=FP32 dtype=%s algo=%d\n", dtype_name, (int)algo);
-	fclose(f);
-}
 
 // Build dump path with optional env overrides:
 // - TNN_DUMP_DIR: directory prefix (no auto-create)
