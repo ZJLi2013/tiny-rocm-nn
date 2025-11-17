@@ -84,6 +84,27 @@ void sample_matrix_values(hipStream_t stream, const T* data, uint32_t m, uint32_
 	}
 	printf("\n");
 }
+
+// Additional helper to sample stats (NaN/Inf/max) from device matrices
+template <typename T>
+void sample_matrix_stats(hipStream_t stream, const T* data, uint32_t m, uint32_t n, const char* name) {
+	const uint32_t sample_count = std::min<uint32_t>(256, m * n);
+	std::vector<T> buf(sample_count);
+
+	CUDA_CHECK_THROW(hipMemcpyAsync(buf.data(), data, sample_count * sizeof(T), hipMemcpyDeviceToHost, stream));
+	CUDA_CHECK_THROW(hipStreamSynchronize(stream));
+
+	size_t nan_count = 0, inf_count = 0;
+	float max_abs = 0.0f;
+	for (uint32_t i = 0; i < sample_count; ++i) {
+		float v = (float)buf[i];
+		if (std::isnan(v)) ++nan_count;
+		else if (std::isinf(v)) ++inf_count;
+		float a = std::fabs(v);
+		if (a > max_abs) max_abs = a;
+	}
+	printf("  %s[%dx%d] stats: NaN=%zu Inf=%zu max=%.4f (sample=%u)\n", name, m, n, nan_count, inf_count, max_abs, sample_count);
+}
 #endif
 
 inline hipblasHandle_t& cublas_handle() {
@@ -157,6 +178,9 @@ void cublas_gemm(
 		compute_type,
 		algo
 	));
+#if ENABLE_HIPBLAS_DEBUG_LOGGING
+	sample_matrix_stats(stream, C.data(), m, n, "C_stats_RM");
+#endif
 
 #if ENABLE_HIPBLAS_DEBUG_LOGGING
 	if (should_log_gemm_call(g_gemm_call_counter)) {
@@ -228,6 +252,9 @@ void cublas_gemm(
 		compute_type,
 		algo
 	));
+#if ENABLE_HIPBLAS_DEBUG_LOGGING
+	sample_matrix_stats(stream, C.data(), m, n, "C_stats_CM");
+#endif
 
 #if ENABLE_HIPBLAS_DEBUG_LOGGING
 	if (should_log_gemm_call(g_gemm_call_counter)) {
@@ -331,6 +358,9 @@ void cublas_gemm(
 			compute_type,
 			algo
 		));
+#if ENABLE_HIPBLAS_DEBUG_LOGGING
+		sample_matrix_stats(stream, C.data(), m, n, "C_stats_MIXED_RM");
+#endif
 	} else {
 		// Output is CM: use standard approach
 		hipblasOperation_t op_a = LA == RM ? HIPBLAS_OP_T : HIPBLAS_OP_N;
@@ -362,6 +392,9 @@ void cublas_gemm(
 			compute_type,
 			algo
 		));
+#if ENABLE_HIPBLAS_DEBUG_LOGGING
+		sample_matrix_stats(stream, C.data(), m, n, "C_stats_MIXED_CM");
+#endif
 	}
 
 #if ENABLE_HIPBLAS_DEBUG_LOGGING
@@ -559,6 +592,9 @@ void fc_multiply(
 
 	// Perform matrix multiplication
 	cublas_gemm(stream, A, B, D, 1.0f, beta);
+#if ENABLE_HIPBLAS_DEBUG_LOGGING
+	sample_matrix_stats(stream, D.data(), D.m(), D.n(), "D_after_gemm");
+#endif
 
 	// Apply activation function if needed (not fused, separate kernel)
 	if (activation != Activation::None) {
@@ -620,6 +656,9 @@ void fc_multiply(
 
 	// Perform matrix multiplication
 	cublas_gemm(stream, A, B, D_mutable, 1.0f, beta);
+#if ENABLE_HIPBLAS_DEBUG_LOGGING
+	sample_matrix_stats(stream, D_mutable.data(), D_mutable.m(), D_mutable.n(), "D_after_gemm");
+#endif
 
 	// Apply activation function if needed (not fused, separate kernel)
 	if (activation != Activation::None) {

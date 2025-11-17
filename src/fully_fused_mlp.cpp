@@ -900,6 +900,42 @@ std::unique_ptr<Context> FullyFusedMLP<T, WIDTH>::forward_impl(hipStream_t strea
 	uint32_t batch_size = input.n();
 	auto forward = allocate_forward_buffers(stream, batch_size);
 
+	// v36: Host-side weight global sampling (diagnostics)
+	{
+		size_t total_params = 0;
+		for (const auto& m : m_weight_matrices) total_params += m.n_elements();
+
+		const char* set_name = use_inference_params ? "inference" : "train";
+		printf("[v36 WEIGHTS] set=%s total_params=%zu\n", set_name, total_params);
+
+		for (size_t i = 0; i < m_weight_matrices.size(); ++i) {
+			const auto& W = use_inference_params ? m_weight_matrices_inference[i] : m_weight_matrices[i];
+			const size_t n = W.n_elements();
+			const size_t sample_n = n < 4096 ? n : (size_t)4096;
+
+			std::vector<__half> host(sample_n);
+			hipError_t err = hipMemcpyAsync(host.data(), W.data(), sample_n * sizeof(__half), hipMemcpyDeviceToHost, stream);
+			if (err != hipSuccess) {
+				printf("[v36 WEIGHTS] idx=%zu m=%u n=%u memcpy_failed=%d\n", i, W.m(), W.n(), (int)err);
+				continue;
+			}
+			hipStreamSynchronize(stream);
+
+			size_t nan_count = 0, inf_count = 0;
+			float max_abs = 0.0f;
+			for (size_t k = 0; k < sample_n; ++k) {
+				float v = __half2float(host[k]);
+				if (std::isnan(v)) { ++nan_count; }
+				else if (std::isinf(v)) { ++inf_count; }
+				float a = fabsf(v);
+				if (a > max_abs) max_abs = a;
+			}
+
+			printf("[v36 WEIGHTS] idx=%zu shape=[%u,%u] stride=%u NaN=%zu Inf=%zu max=%.4f\n",
+				i, W.m(), W.n(), W.stride(), nan_count, inf_count, max_abs);
+		}
+	}
+
 	// ASSUMPTION: weight matrices & forward_tmp matrices are contiguous in memory
 	switch (m_activation) {
 		case Activation::None:        mlp_fused_forward<WIDTH, T, Activation::None, false>(       stream, m_output_activation, input_weight_matrix(use_inference_params), input, forward->hidden.at(0), output, m_n_hidden_matmuls); break;
