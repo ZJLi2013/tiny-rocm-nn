@@ -114,6 +114,83 @@ void sample_matrix_stats(hipStream_t stream, const T* data, uint32_t m, uint32_t
 		}
 	}
 }
+#if ENABLE_HIPBLAS_DEBUG_LOGGING
+// Dump-once control for A/B/C_before anomaly
+static int g_first_abcbefore_dump_done = 0;
+
+// Write binary dump using C stdio (minimal dependency)
+template <typename T>
+void dump_binary(const char* filename, const std::vector<T>& buf) {
+	FILE* f = fopen(filename, "wb");
+	if (!f) {
+		printf("  [dump] fopen failed: %s\n", filename);
+		return;
+	}
+	fwrite(buf.data(), sizeof(T), buf.size(), f);
+	fclose(f);
+}
+
+	// Detect anomaly by sampling a small prefix first. Only if anomaly is found,
+	// perform a full-device-to-host copy and dump once.
+template <typename T>
+bool stats_and_dump_once(hipStream_t stream, const T* data, uint32_t m, uint32_t n, const char* tag, const char* prefix) {
+	if (g_first_abcbefore_dump_done) return false;
+
+	const size_t total = (size_t)m * (size_t)n;
+	const uint32_t sample_count = std::min<uint32_t>(256, (uint32_t)total);
+
+	// Step 1: small sample to detect anomaly cheaply
+	std::vector<T> sample(sample_count);
+	hipError_t herr = hipMemcpyAsync(sample.data(), data, sample_count * sizeof(T), hipMemcpyDeviceToHost, stream);
+	hipStreamSynchronize(stream);
+	if (herr != hipSuccess) {
+		printf("  [dump] hipMemcpyAsync(sample %s) failed: %d\n", tag, (int)herr);
+		return false;
+	}
+
+	size_t nan_count = 0, inf_count = 0;
+	float max_abs = 0.0f;
+	for (uint32_t i = 0; i < sample_count; ++i) {
+		float v = (float)sample[i];
+		if (std::isnan(v)) ++nan_count;
+		else if (std::isinf(v)) ++inf_count;
+		float a = std::fabs(v);
+		if (a > max_abs) max_abs = a;
+	}
+
+	// No anomaly detected in sample: do nothing
+	if (nan_count == 0 && inf_count == 0) {
+		return false;
+	}
+
+	// Step 2: anomaly detected — copy full tensor and dump (once)
+	std::vector<T> buf(total);
+	herr = hipMemcpyAsync(buf.data(), data, total * sizeof(T), hipMemcpyDeviceToHost, stream);
+	hipStreamSynchronize(stream);
+	if (herr != hipSuccess) {
+		printf("  [dump] hipMemcpyAsync(full %s) failed: %d\n", tag, (int)herr);
+		return false;
+	}
+
+	// Recompute stats on full buffer for accurate reporting
+	size_t fnan = 0, finf = 0;
+	float fmax = 0.0f;
+	for (size_t i = 0; i < total; ++i) {
+		float v = (float)buf[i];
+		if (std::isnan(v)) ++fnan;
+		else if (std::isinf(v)) ++finf;
+		float a = std::fabs(v);
+		if (a > fmax) fmax = a;
+	}
+	printf("  %s[%dx%d] BEFORE stats: NaN=%zu Inf=%zu max=%.6f\n", tag, (int)m, (int)n, fnan, finf, fmax);
+
+	char fname[256];
+	snprintf(fname, sizeof(fname), "%s%s.bin", prefix, tag);
+	dump_binary(fname, buf);
+	g_first_abcbefore_dump_done = 1;
+	printf("  [dump-once] wrote %s (%zu elements)\n", fname, total);
+	return true;
+}
 #endif
 
 inline hipblasHandle_t& cublas_handle() {
@@ -277,6 +354,16 @@ void cublas_gemm(
 
 		// Swap the operations to match the swapped matrices
 		// With FP32 compute, always use float* for alpha/beta
+#if ENABLE_HIPBLAS_DEBUG_LOGGING
+		// Pre-GEMM once-only anomaly check and dump of A/B/C_before
+		if (!g_first_abcbefore_dump_done) {
+			// Dump triggers on first occurrence of NaN/Inf among A, B, or C_before
+			(void)stats_and_dump_once(stream, A.data(), A.m(), A.n(), "A_before", "mixed_rm_first_");
+			if (!g_first_abcbefore_dump_done) (void)stats_and_dump_once(stream, B.data(), B.m(), B.n(), "B_before", "mixed_rm_first_");
+			if (!g_first_abcbefore_dump_done) (void)stats_and_dump_once(stream, C.data(), C.m(), C.n(), "C_before", "mixed_rm_first_");
+		}
+#endif
+
 		CUBLAS_CHECK_THROW(hipblasGemmEx(
 			cublas_handle(),
 			op_b, op_a,
@@ -338,6 +425,24 @@ void cublas_gemm(
 						alpha, beta, dtype_name, (int)algo,
 						nan_count, inf_count
 					);
+
+					// Sample first 8 elements of A, B, C
+					std::vector<T> abuf(8), bbuf(8);
+					hipMemcpyAsync(abuf.data(), A.data(), 8 * sizeof(T), hipMemcpyDeviceToHost, stream);
+					hipMemcpyAsync(bbuf.data(), B.data(), 8 * sizeof(T), hipMemcpyDeviceToHost, stream);
+					hipStreamSynchronize(stream);
+
+					printf("  A[0:8]: ");
+					for (int i = 0; i < 8; ++i) printf("%.4f ", (float)abuf[i]);
+					printf("\n");
+
+					printf("  B[0:8]: ");
+					for (int i = 0; i < 8; ++i) printf("%.4f ", (float)bbuf[i]);
+					printf("\n");
+
+					printf("  C[0:8]: ");
+					for (int i = 0; i < 8; ++i) printf("%.4f ", (float)cbuf[i]);
+					printf("\n");
 
 					if (!anom_idx.empty()) {
 						printf("  C anomalies (first %zu): ", anom_idx.size());
