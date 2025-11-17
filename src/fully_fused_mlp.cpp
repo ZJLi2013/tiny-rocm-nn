@@ -906,7 +906,7 @@ std::unique_ptr<Context> FullyFusedMLP<T, WIDTH>::forward_impl(hipStream_t strea
 		for (const auto& m : m_weight_matrices) total_params += m.n_elements();
 
 		const char* set_name = use_inference_params ? "inference" : "train";
-		printf("[v36 WEIGHTS] set=%s total_params=%zu\n", set_name, total_params);
+		bool printed_header = false;
 
 		for (size_t i = 0; i < m_weight_matrices.size(); ++i) {
 			const auto& W = use_inference_params ? m_weight_matrices_inference[i] : m_weight_matrices[i];
@@ -931,8 +931,15 @@ std::unique_ptr<Context> FullyFusedMLP<T, WIDTH>::forward_impl(hipStream_t strea
 				if (a > max_abs) max_abs = a;
 			}
 
-			printf("[v36 WEIGHTS] idx=%zu shape=[%u,%u] stride=%u NaN=%zu Inf=%zu max=%.4f\n",
-				i, W.m(), W.n(), W.stride(), nan_count, inf_count, max_abs);
+			// Only print when anomalies are detected
+			if (nan_count > 0 || inf_count > 0) {
+				if (!printed_header) {
+					printf("[v36 WEIGHTS] set=%s total_params=%zu\n", set_name, total_params);
+					printed_header = true;
+				}
+				printf("[v36 WEIGHTS] idx=%zu shape=[%u,%u] stride=%u NaN=%zu Inf=%zu max=%.4f\n",
+					i, W.m(), W.n(), W.stride(), nan_count, inf_count, max_abs);
+			}
 		}
 	}
 

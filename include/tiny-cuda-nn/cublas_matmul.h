@@ -103,9 +103,18 @@ void sample_matrix_stats(hipStream_t stream, const T* data, uint32_t m, uint32_t
 		float a = std::fabs(v);
 		if (a > max_abs) max_abs = a;
 	}
-	// Only log when anomalies are detected to keep logs concise
-	if (nan_count > 0 || inf_count > 0) {
+
+	// Throttle anomaly logging: only print first few anomalies globally
+	static int g_anomaly_logs = 0;
+	constexpr int MAX_ANOMALY_LOGS = 10;
+
+	if ((nan_count > 0 || inf_count > 0) && g_anomaly_logs < MAX_ANOMALY_LOGS) {
+		++g_anomaly_logs;
 		printf("  %s[%dx%d] stats: NaN=%zu Inf=%zu max=%.4f (sample=%u)\n", name, m, n, nan_count, inf_count, max_abs, sample_count);
+		// Optional: after reaching the cap, print a single suppression notice
+		if (g_anomaly_logs == MAX_ANOMALY_LOGS) {
+			printf("  [gemm-stats] further anomaly logs suppressed (cap=%d)\n", MAX_ANOMALY_LOGS);
+		}
 	}
 }
 #endif
