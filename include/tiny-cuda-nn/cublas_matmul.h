@@ -60,6 +60,7 @@ namespace tcnn {
 static int g_gemm_call_counter = 0;
 static int g_fc_multiply_call_counter = 0;
 static int g_fc_multiply_split_k_call_counter = 0;
+#endif 
 
 // Helper function to sample matrix values for debugging
 template <typename T>
@@ -117,8 +118,14 @@ void sample_matrix_stats(hipStream_t stream, const T* data, uint32_t m, uint32_t
 #if ENABLE_HIPBLAS_DEBUG_LOGGING
 // Dump-once control for A/B/C_before anomaly
 static int g_first_abcbefore_dump_done = 0;
+// Optional: force a single dump at the first MIXED_RM GEMM, regardless of anomaly.
+// Enable via environment variable TNN_DUMP_ONCE_FORCE=1
+static bool g_dump_force_once = []() {
+	const char* s = std::getenv("TNN_DUMP_ONCE_FORCE");
+	return s && (s[0]=='1' || s[0]=='T' || s[0]=='t' || s[0]=='y' || s[0]=='Y');
+}();
 
-// Write binary dump using C stdio (minimal dependency)
+	// Write binary dump using C stdio (minimal dependency)
 template <typename T>
 void dump_binary(const char* filename, const std::vector<T>& buf) {
 	FILE* f = fopen(filename, "wb");
@@ -127,6 +134,92 @@ void dump_binary(const char* filename, const std::vector<T>& buf) {
 		return;
 	}
 	fwrite(buf.data(), sizeof(T), buf.size(), f);
+	fclose(f);
+}
+
+// Minimal metadata dump to accompany tensor dumps
+inline void dump_meta(const char* filename, const char* tag,
+	int m, int n, int k,
+	hipblasOperation_t op_a, hipblasOperation_t op_b,
+	int lda, int ldb, int ldc,
+	float alpha, float beta,
+	const void* A_ptr, const void* B_ptr, const void* C_ptr,
+	hipblasComputeType_t compute_type, hipDataType dtype, hipblasGemmAlgo_t algo
+) {
+	const char* op_name_a = (op_a == HIPBLAS_OP_N ? "N" : (op_a == HIPBLAS_OP_T ? "T" : "C"));
+	const char* op_name_b = (op_b == HIPBLAS_OP_N ? "N" : (op_b == HIPBLAS_OP_T ? "T" : "C"));
+	const char* dtype_name = (dtype == HIPBLAS_R_32F ? "FP32" : (dtype == HIPBLAS_R_16F ? "FP16" : "UNKNOWN"));
+
+	FILE* f = fopen(filename, "w");
+	if (!f) {
+		printf("  [meta] fopen failed: %s\n", filename);
+		return;
+	}
+	fprintf(f, "tag=%s\n", tag);
+	fprintf(f, "m=%d n=%d k=%d\n", m, n, k);
+	fprintf(f, "op_a=%s op_b=%s\n", op_name_a, op_name_b);
+	fprintf(f, "lda=%d ldb=%d ldc=%d\n", lda, ldb, ldc);
+	fprintf(f, "alpha=%.8f beta=%.8f\n", alpha, beta);
+	fprintf(f, "A_ptr=%p B_ptr=%p C_ptr=%p\n", A_ptr, B_ptr, C_ptr);
+	fprintf(f, "compute_type=FP32 dtype=%s algo=%d\n", dtype_name, (int)algo);
+	fclose(f);
+}
+
+// Build dump path with optional env overrides:
+// - TNN_DUMP_DIR: directory prefix (no auto-create)
+// - TNN_DUMP_TAG: suffix tag inserted before extension
+inline void make_dump_path(char* out, size_t out_size, const char* prefix, const char* base, const char* ext) {
+	const char* dir_env = std::getenv("TNN_DUMP_DIR");
+	const char* tag_env = std::getenv("TNN_DUMP_TAG");
+
+	const bool has_dir = (dir_env && dir_env[0] != '\0');
+	const bool has_tag = (tag_env && tag_env[0] != '\0');
+
+	if (has_dir) {
+		// Ensure single separator
+		size_t len = std::strlen(dir_env);
+		bool need_sep = len > 0 && (dir_env[len-1] != '/' && dir_env[len-1] != '\\');
+		if (has_tag) {
+			snprintf(out, out_size, "%s%s%s%s%s%s",
+				dir_env, need_sep ? "/" : "", prefix, base, tag_env, ext);
+		} else {
+			snprintf(out, out_size, "%s%s%s%s%s",
+				dir_env, need_sep ? "/" : "", prefix, base, ext);
+		}
+	} else {
+		if (has_tag) {
+			snprintf(out, out_size, "%s%s%s%s", prefix, base, tag_env, ext);
+		} else {
+			snprintf(out, out_size, "%s%s%s", prefix, base, ext);
+		}
+	}
+}
+
+// Minimal metadata dump to accompany tensor dumps
+inline void dump_meta(const char* filename, const char* tag,
+	int m, int n, int k,
+	hipblasOperation_t op_a, hipblasOperation_t op_b,
+	int lda, int ldb, int ldc,
+	float alpha, float beta,
+	const void* A_ptr, const void* B_ptr, const void* C_ptr,
+	hipblasComputeType_t compute_type, hipDataType dtype, hipblasGemmAlgo_t algo
+) {
+	const char* op_name_a = (op_a == HIPBLAS_OP_N ? "N" : (op_a == HIPBLAS_OP_T ? "T" : "C"));
+	const char* op_name_b = (op_b == HIPBLAS_OP_N ? "N" : (op_b == HIPBLAS_OP_T ? "T" : "C"));
+	const char* dtype_name = (dtype == HIPBLAS_R_32F ? "FP32" : (dtype == HIPBLAS_R_16F ? "FP16" : "UNKNOWN"));
+
+	FILE* f = fopen(filename, "w");
+	if (!f) {
+		printf("  [meta] fopen failed: %s\n", filename);
+		return;
+	}
+	fprintf(f, "tag=%s\n", tag);
+	fprintf(f, "m=%d n=%d k=%d\n", m, n, k);
+	fprintf(f, "op_a=%s op_b=%s\n", op_name_a, op_name_b);
+	fprintf(f, "lda=%d ldb=%d ldc=%d\n", lda, ldb, ldc);
+	fprintf(f, "alpha=%.8f beta=%.8f\n", alpha, beta);
+	fprintf(f, "A_ptr=%p B_ptr=%p C_ptr=%p\n", A_ptr, B_ptr, C_ptr);
+	fprintf(f, "compute_type=FP32 dtype=%s algo=%d\n", dtype_name, (int)algo);
 	fclose(f);
 }
 
@@ -184,8 +277,8 @@ bool stats_and_dump_once(hipStream_t stream, const T* data, uint32_t m, uint32_t
 	}
 	printf("  %s[%dx%d] BEFORE stats: NaN=%zu Inf=%zu max=%.6f\n", tag, (int)m, (int)n, fnan, finf, fmax);
 
-	char fname[256];
-	snprintf(fname, sizeof(fname), "%s%s.bin", prefix, tag);
+	char fname[512];
+	make_dump_path(fname, sizeof(fname), prefix, tag, ".bin");
 	dump_binary(fname, buf);
 	g_first_abcbefore_dump_done = 1;
 	printf("  [dump-once] wrote %s (%zu elements)\n", fname, total);
@@ -355,12 +448,85 @@ void cublas_gemm(
 		// Swap the operations to match the swapped matrices
 		// With FP32 compute, always use float* for alpha/beta
 #if ENABLE_HIPBLAS_DEBUG_LOGGING
-		// Pre-GEMM once-only anomaly check and dump of A/B/C_before
+		// Pre-GEMM: either force a single dump, or dump once when anomaly is detected
 		if (!g_first_abcbefore_dump_done) {
-			// Dump triggers on first occurrence of NaN/Inf among A, B, or C_before
-			(void)stats_and_dump_once(stream, A.data(), A.m(), A.n(), "A_before", "mixed_rm_first_");
-			if (!g_first_abcbefore_dump_done) (void)stats_and_dump_once(stream, B.data(), B.m(), B.n(), "B_before", "mixed_rm_first_");
-			if (!g_first_abcbefore_dump_done) (void)stats_and_dump_once(stream, C.data(), C.m(), C.n(), "C_before", "mixed_rm_first_");
+			if (g_dump_force_once) {
+				// Force dump full A/B/C_before on the first MIXED_RM GEMM
+				{
+					std::vector<T> abuf((size_t)A.m() * (size_t)A.n());
+					std::vector<T> bbuf((size_t)B.m() * (size_t)B.n());
+					std::vector<T> cbuf((size_t)C.m() * (size_t)C.n());
+					hipMemcpyAsync(abuf.data(), A.data(), abuf.size() * sizeof(T), hipMemcpyDeviceToHost, stream);
+					hipMemcpyAsync(bbuf.data(), B.data(), bbuf.size() * sizeof(T), hipMemcpyDeviceToHost, stream);
+					hipMemcpyAsync(cbuf.data(), C.data(), cbuf.size() * sizeof(T), hipMemcpyDeviceToHost, stream);
+					hipStreamSynchronize(stream);
+
+					char pA[512], pB[512], pC[512], pM[512];
+					make_dump_path(pA, sizeof(pA), "mixed_rm_force_", "A_before", ".bin");
+					make_dump_path(pB, sizeof(pB), "mixed_rm_force_", "B_before", ".bin");
+					make_dump_path(pC, sizeof(pC), "mixed_rm_force_", "C_before", ".bin");
+					make_dump_path(pM, sizeof(pM), "mixed_rm_force_", "meta", ".txt");
+					dump_binary(pA, abuf);
+					dump_binary(pB, bbuf);
+					dump_binary(pC, cbuf);
+					dump_meta(pM, "force",
+						m, n, k, op_a, op_b,
+						A.stride(), B.stride(), C.stride(),
+						alpha, beta,
+						(const void*)A.data(), (const void*)B.data(), (const void*)C.data(),
+						compute_type, cuda_data_type, algo
+					);
+					printf("  [dump-once] forced dumps written (mixed_rm_force_*.bin + meta)\n");
+				}
+				g_dump_force_once = false;
+				g_first_abcbefore_dump_done = 1;
+			} else {
+				// Dump triggers on first occurrence of NaN/Inf among A, B, or C_before
+				(void)stats_and_dump_once(stream, A.data(), A.m(), A.n(), "A_before", "mixed_rm_first_");
+				if (g_first_abcbefore_dump_done) {
+					{
+						char metaP[512];
+						make_dump_path(metaP, sizeof(metaP), "mixed_rm_first_", "meta", ".txt");
+						dump_meta(metaP, "A_before",
+							m, n, k, op_a, op_b,
+							A.stride(), B.stride(), C.stride(),
+							alpha, beta,
+							(const void*)A.data(), (const void*)B.data(), (const void*)C.data(),
+							compute_type, cuda_data_type, algo
+						);
+					}
+				} else {
+					(void)stats_and_dump_once(stream, B.data(), B.m(), B.n(), "B_before", "mixed_rm_first_");
+					if (g_first_abcbefore_dump_done) {
+						{
+							char metaP[512];
+							make_dump_path(metaP, sizeof(metaP), "mixed_rm_first_", "meta", ".txt");
+							dump_meta(metaP, "B_before",
+								m, n, k, op_a, op_b,
+								A.stride(), B.stride(), C.stride(),
+								alpha, beta,
+								(const void*)A.data(), (const void*)B.data(), (const void*)C.data(),
+								compute_type, cuda_data_type, algo
+							);
+						}
+					} else {
+						(void)stats_and_dump_once(stream, C.data(), C.m(), C.n(), "C_before", "mixed_rm_first_");
+						if (g_first_abcbefore_dump_done) {
+							{
+								char metaP[512];
+								make_dump_path(metaP, sizeof(metaP), "mixed_rm_first_", "meta", ".txt");
+								dump_meta(metaP, "C_before",
+									m, n, k, op_a, op_b,
+									A.stride(), B.stride(), C.stride(),
+									alpha, beta,
+									(const void*)A.data(), (const void*)B.data(), (const void*)C.data(),
+									compute_type, cuda_data_type, algo
+								);
+							}
+						}
+					}
+				}
+			}
 		}
 #endif
 
