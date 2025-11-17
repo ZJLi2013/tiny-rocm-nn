@@ -37,6 +37,11 @@
 #include <hipblas.h>
 
 #include <type_traits>
+#include <cstdlib>
+#include <cstdio>
+#include <cctype>
+#include <string>
+#include <algorithm>
 
 namespace tcnn {
 
@@ -56,11 +61,46 @@ static int g_gemm_call_counter = 0;
 static int g_fc_multiply_call_counter = 0;
 static int g_fc_multiply_split_k_call_counter = 0;
 
+// Runtime debug config controlled via environment variables
+static bool g_dbg_enabled = true;
+static int  g_log_first_n = 10;
+static int  g_log_every = 0;
+static int  g_log_window_start = -1;
+static int  g_log_window_end = -1;
+
+inline void init_debug_config() {
+	static bool inited = false;
+	if (inited) return;
+	inited = true;
+	if (const char* s = std::getenv("TNN_HIPBLAS_DEBUG")) {
+		std::string v{s};
+		for (auto& c : v) c = (char)std::tolower(c);
+		g_dbg_enabled = !(v == "0" || v == "false" || v == "off");
+	}
+	if (const char* s = std::getenv("TNN_HIPBLAS_LOG_FIRST_N")) {
+		g_log_first_n = std::max(0, atoi(s));
+	}
+	if (const char* s = std::getenv("TNN_HIPBLAS_LOG_EVERY")) {
+		g_log_every = std::max(0, atoi(s));
+	}
+	if (const char* s = std::getenv("TNN_HIPBLAS_LOG_WINDOW")) {
+		// format "start-end"
+		int a=-1,b=-1;
+		if (sscanf(s, "%d-%d", &a, &b) == 2) {
+			g_log_window_start = a;
+			g_log_window_end = b;
+		}
+	}
+}
 // Helper to check if we should log this call (sample every Nth call after initial burst)
 inline bool should_log_gemm_call(int call_num) {
-	if (call_num <= 10) return true;  // Log first 20 calls
-	// if (call_num >= 190 && call_num <= 200) return true;  // Log around where NaN appears (GEMM #195)
-	// if (call_num % 100 == 0) return true;  // Sample every 100th call
+	init_debug_config();
+	if (!g_dbg_enabled) return false;
+	if (g_log_window_start >= 0 && g_log_window_end >= 0) {
+		if (call_num >= g_log_window_start && call_num <= g_log_window_end) return true;
+	}
+	if (call_num <= g_log_first_n) return true;
+	if (g_log_every > 0 && (call_num % g_log_every) == 0) return true;
 	return false;
 }
 
@@ -168,8 +208,12 @@ void cublas_gemm(
 		printf("  alpha=%.4f, beta=%.4f\n", alpha, beta);
 		printf("  data_type=%s, compute_type=FP32\n", 
 			   cuda_data_type == HIPBLAS_R_32F ? "FP32" : "FP16");
+		printf("  ops: opB=N opA=N (RM path uses B_cm * A_cm equivalence)\n");
 		sample_matrix_values(stream, A.data(), m, k, "A");
 		sample_matrix_values(stream, B.data(), k, n, "B");
+		if (beta != 0.0f) {
+			sample_matrix_values(stream, C.data(), m, n, "C_before");
+		}
 	}
 #endif
 	
@@ -246,8 +290,12 @@ void cublas_gemm(
 		printf("  alpha=%.4f, beta=%.4f\n", alpha, beta);
 		printf("  data_type=%s, compute_type=FP32\n",
 			   cuda_data_type == HIPBLAS_R_32F ? "FP32" : "FP16");
+		printf("  ops: opA=N opB=N\n");
 		sample_matrix_values(stream, A.data(), m, k, "A");
 		sample_matrix_values(stream, B.data(), k, n, "B");
+		if (beta != 0.0f) {
+			sample_matrix_values(stream, C.data(), m, n, "C_before");
+		}
 	}
 #endif
 
@@ -371,7 +419,55 @@ void cublas_gemm(
 			algo
 		));
 #if ENABLE_HIPBLAS_DEBUG_LOGGING
-		sample_matrix_stats(stream, C.data(), m, n, "C_stats_MIXED_RM");
+	sample_matrix_stats(stream, C.data(), m, n, "C_stats_MIXED_RM");
+
+	// v39: Extra anomaly dump for MIXED_RM path regardless of should_log sampling
+	{
+		// Quick check of first up-to-256 elements of C for NaN/Inf
+		const uint32_t sample_count = std::min<uint32_t>(256, (uint32_t)(m * n));
+		std::vector<T> cbuf(sample_count);
+		hipError_t herr = hipMemcpyAsync(cbuf.data(), C.data(), sample_count * sizeof(T), hipMemcpyDeviceToHost, stream);
+		hipStreamSynchronize(stream);
+		if (herr == hipSuccess) {
+			bool has_nan = false, has_inf = false;
+			for (uint32_t i = 0; i < sample_count; ++i) {
+				float v = (float)cbuf[i];
+				if (std::isnan(v)) { has_nan = true; break; }
+				if (std::isinf(v)) { has_inf = true; break; }
+			}
+			if (has_nan || has_inf) {
+				const char* op_a_name = (LA == RM ? "N" : "T");
+				const char* op_b_name = (LB == RM ? "N" : "T");
+				const char* dtype_name = (cuda_data_type == HIPBLAS_R_32F ? "FP32" : "FP16");
+				printf("[v39 MIXED_RM GEMM ANOMALY]\n");
+				printf("  dims: m=%d n=%d k=%d (RM output)\n", m, n, k);
+				printf("  ops : op_b=%s op_a=%s (hipblasEx called with B then A)\n", op_b_name, op_a_name);
+				printf("  lda/ldb/ldc: B.stride()=%d A.stride()=%d C.stride()=%d\n", B.stride(), A.stride(), C.stride());
+				printf("  alpha=%.6f beta=%.6f dtype=%s compute=FP32 algo=%d\n", alpha, beta, dtype_name, (int)algo);
+				printf("  ptrs: A=%p B=%p C=%p stream=%p\n", (void*)A.data(), (void*)B.data(), (void*)C.data(), (void*)stream);
+
+				// Sample a few A/B values to help diagnose transpose/stride issues
+				const uint32_t sA = std::min<uint32_t>(32, (uint32_t)(m * k));
+				const uint32_t sB = std::min<uint32_t>(32, (uint32_t)(k * n));
+				std::vector<T> abuf(sA), bbuf(sB);
+				if (hipMemcpyAsync(abuf.data(), A.data(), sA * sizeof(T), hipMemcpyDeviceToHost, stream) == hipSuccess &&
+				    hipMemcpyAsync(bbuf.data(), B.data(), sB * sizeof(T), hipMemcpyDeviceToHost, stream) == hipSuccess) {
+					hipStreamSynchronize(stream);
+					printf("  A[0:8]: ");
+					for (uint32_t i = 0; i < std::min<uint32_t>(8, sA); ++i) printf("%.4f ", (float)abuf[i]);
+					printf("\n");
+					printf("  B[0:8]: ");
+					for (uint32_t i = 0; i < std::min<uint32_t>(8, sB); ++i) printf("%.4f ", (float)bbuf[i]);
+					printf("\n");
+					printf("  C[0:8]: ");
+					for (uint32_t i = 0; i < std::min<uint32_t>(8, sample_count); ++i) printf("%.4f ", (float)cbuf[i]);
+					printf("\n");
+				}
+			}
+		} else {
+			printf("[v39 MIXED_RM GEMM ANOMALY] hipMemcpyAsync(C sample) failed: %d\n", (int)herr);
+		}
+	}
 #endif
 	} else {
 		// Output is CM: use standard approach
