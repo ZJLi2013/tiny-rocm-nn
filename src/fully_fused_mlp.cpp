@@ -36,6 +36,9 @@
 #include <tiny-cuda-nn/multi_stream.h>
 
 #include <rocwmma/rocwmma.hpp>
+#include <vector>
+#include <cstdio>
+#include <cmath>
 
 namespace tcnn {
 
@@ -722,6 +725,44 @@ std::enable_if_t<std::is_same<__half, T>::value> mlp_fused_forward(
 ) {
 	const uint32_t batch_size = input.cols();
 	const uint32_t in_width = input.rows();
+
+	// v35: Host-side sampling of forward input matrix (diagnostics)
+	{
+		static int s_fwd_calls = 0;
+		++s_fwd_calls;
+
+		const size_t rows = in_width;
+		const size_t cols = batch_size;
+		const size_t total = rows * cols;
+		const size_t sample = total < 4096 ? total : (size_t)4096;
+
+		std::vector<__half> host(sample);
+		hipError_t err = hipMemcpy(host.data(), input.data(), sample * sizeof(__half), hipMemcpyDeviceToHost);
+
+		size_t nan_count = 0, inf_count = 0;
+		float max_abs = 0.0f;
+
+		if (err == hipSuccess) {
+			for (size_t i = 0; i < sample; ++i) {
+				float v = __half2float(host[i]);
+				if (std::isnan(v)) { ++nan_count; }
+				else if (std::isinf(v)) { ++inf_count; }
+				float a = fabsf(v);
+				if (a > max_abs) max_abs = a;
+			}
+
+			const char* layout_name = input.layout() == RM ? "RM" : "CM";
+			const char* mapped_layout = input.layout() == RM ? "mem_col_major" : "mem_row_major";
+
+			// Print first few calls and then every 500 calls to limit verbosity
+			if (s_fwd_calls <= 5 || (s_fwd_calls % 500) == 0) {
+				printf("[v35 FWD-IN] call=%d layout=%s rows=%zu cols=%zu stride=%u mapped=%s NaN=%zu Inf=%zu max=%.2f\n",
+					s_fwd_calls, layout_name, rows, cols, input.stride(), mapped_layout, nan_count, inf_count, max_abs);
+			}
+		} else {
+			printf("[v35 FWD-IN] call=%d hipMemcpy failed: %d\n", s_fwd_calls, (int)err);
+		}
+	}
 
 	constexpr uint32_t SKEW = WIDTH % 16 == 0 ? 8 : 0; // <- always going to be 8 as we only support multiple-of-16 widths
 	constexpr uint32_t INPUT_SKEW = 8; // <- likewise with inputs
