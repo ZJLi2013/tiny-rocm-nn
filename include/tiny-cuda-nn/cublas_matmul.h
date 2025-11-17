@@ -61,49 +61,6 @@ static int g_gemm_call_counter = 0;
 static int g_fc_multiply_call_counter = 0;
 static int g_fc_multiply_split_k_call_counter = 0;
 
-// Runtime debug config controlled via environment variables
-static bool g_dbg_enabled = true;
-static int  g_log_first_n = 10;
-static int  g_log_every = 0;
-static int  g_log_window_start = -1;
-static int  g_log_window_end = -1;
-
-inline void init_debug_config() {
-	static bool inited = false;
-	if (inited) return;
-	inited = true;
-	if (const char* s = std::getenv("TNN_HIPBLAS_DEBUG")) {
-		std::string v{s};
-		for (auto& c : v) c = (char)std::tolower(c);
-		g_dbg_enabled = !(v == "0" || v == "false" || v == "off");
-	}
-	if (const char* s = std::getenv("TNN_HIPBLAS_LOG_FIRST_N")) {
-		g_log_first_n = std::max(0, atoi(s));
-	}
-	if (const char* s = std::getenv("TNN_HIPBLAS_LOG_EVERY")) {
-		g_log_every = std::max(0, atoi(s));
-	}
-	if (const char* s = std::getenv("TNN_HIPBLAS_LOG_WINDOW")) {
-		// format "start-end"
-		int a=-1,b=-1;
-		if (sscanf(s, "%d-%d", &a, &b) == 2) {
-			g_log_window_start = a;
-			g_log_window_end = b;
-		}
-	}
-}
-// Helper to check if we should log this call (sample every Nth call after initial burst)
-inline bool should_log_gemm_call(int call_num) {
-	init_debug_config();
-	if (!g_dbg_enabled) return false;
-	if (g_log_window_start >= 0 && g_log_window_end >= 0) {
-		if (call_num >= g_log_window_start && call_num <= g_log_window_end) return true;
-	}
-	if (call_num <= g_log_first_n) return true;
-	if (g_log_every > 0 && (call_num % g_log_every) == 0) return true;
-	return false;
-}
-
 // Helper function to sample matrix values for debugging
 template <typename T>
 void sample_matrix_values(hipStream_t stream, const T* data, uint32_t m, uint32_t n, const char* name) {
@@ -199,24 +156,6 @@ void cublas_gemm(
 	hipblasComputeType_t compute_type = HIPBLAS_COMPUTE_32F;
 	hipblasGemmAlgo_t algo = HIPBLAS_GEMM_DEFAULT;
 	
-#if ENABLE_HIPBLAS_DEBUG_LOGGING
-	++g_gemm_call_counter;
-	if (should_log_gemm_call(g_gemm_call_counter)) {
-		printf("\n[hipBLAS GEMM #%d] RM×RM→RM\n", g_gemm_call_counter);
-		printf("  Dimensions: A[%d,%d] × B[%d,%d] → C[%d,%d]\n", m, k, k, n, m, n);
-		printf("  Strides: A=%d, B=%d, C=%d\n", A.stride(), B.stride(), C.stride());
-		printf("  alpha=%.4f, beta=%.4f\n", alpha, beta);
-		printf("  data_type=%s, compute_type=FP32\n", 
-			   cuda_data_type == HIPBLAS_R_32F ? "FP32" : "FP16");
-		printf("  ops: opB=N opA=N (RM path uses B_cm * A_cm equivalence)\n");
-		sample_matrix_values(stream, A.data(), m, k, "A");
-		sample_matrix_values(stream, B.data(), k, n, "B");
-		if (beta != 0.0f) {
-			sample_matrix_values(stream, C.data(), m, n, "C_before");
-		}
-	}
-#endif
-	
 	// Since all matrices are row-major, we can use the identity (A*B)^T = B^T * A^T
 	// and compute C_cm = B_cm * A_cm, which is equivalent to C_rm = A_rm * B_rm
 	// but with swapped arguments.
@@ -238,19 +177,6 @@ void cublas_gemm(
 	sample_matrix_stats(stream, C.data(), m, n, "C_stats_RM");
 #endif
 
-#if ENABLE_HIPBLAS_DEBUG_LOGGING
-	if (should_log_gemm_call(g_gemm_call_counter)) {
-		sample_matrix_values(stream, C.data(), m, n, "C_output");
-		// Check for NaN in output
-		std::vector<T> check_sample(1);
-		CUDA_CHECK_THROW(hipMemcpyAsync(check_sample.data(), C.data(), sizeof(T), hipMemcpyDeviceToHost, stream));
-		CUDA_CHECK_THROW(hipStreamSynchronize(stream));
-		if (std::isnan((float)check_sample[0])) {
-			printf("  ⚠️  WARNING: NaN detected in output at GEMM #%d!\n", g_gemm_call_counter);
-			printf("  This is the FIRST occurrence of NaN in matrix multiplication output.\n");
-		}
-	}
-#endif
 }
 
 template <typename T>
@@ -281,24 +207,6 @@ void cublas_gemm(
 	hipblasComputeType_t compute_type = HIPBLAS_COMPUTE_32F;
 	hipblasGemmAlgo_t algo = HIPBLAS_GEMM_DEFAULT;
 
-#if ENABLE_HIPBLAS_DEBUG_LOGGING
-	++g_gemm_call_counter;
-	if (should_log_gemm_call(g_gemm_call_counter)) {
-		printf("\n[hipBLAS GEMM #%d] CM×CM→CM\n", g_gemm_call_counter);
-		printf("  Dimensions: A[%d,%d] × B[%d,%d] → C[%d,%d]\n", m, k, k, n, m, n);
-		printf("  Strides: A=%d, B=%d, C=%d\n", A.stride(), B.stride(), C.stride());
-		printf("  alpha=%.4f, beta=%.4f\n", alpha, beta);
-		printf("  data_type=%s, compute_type=FP32\n",
-			   cuda_data_type == HIPBLAS_R_32F ? "FP32" : "FP16");
-		printf("  ops: opA=N opB=N\n");
-		sample_matrix_values(stream, A.data(), m, k, "A");
-		sample_matrix_values(stream, B.data(), k, n, "B");
-		if (beta != 0.0f) {
-			sample_matrix_values(stream, C.data(), m, n, "C_before");
-		}
-	}
-#endif
-
 	// With FP32 compute, always use float* for alpha/beta
 	CUBLAS_CHECK_THROW(hipblasGemmEx(
 		cublas_handle(),
@@ -316,11 +224,6 @@ void cublas_gemm(
 	sample_matrix_stats(stream, C.data(), m, n, "C_stats_CM");
 #endif
 
-#if ENABLE_HIPBLAS_DEBUG_LOGGING
-	if (should_log_gemm_call(g_gemm_call_counter)) {
-		sample_matrix_values(stream, C.data(), m, n, "C_output");
-	}
-#endif
 }
 
 // Fallback for mixed layouts (less efficient due to potential transposes)
@@ -352,27 +255,7 @@ void cublas_gemm(
 	hipblasComputeType_t compute_type = HIPBLAS_COMPUTE_32F;
 	hipblasGemmAlgo_t algo = HIPBLAS_GEMM_DEFAULT;
 	
-#if ENABLE_HIPBLAS_DEBUG_LOGGING
-	++g_gemm_call_counter;
-	bool should_log = should_log_gemm_call(g_gemm_call_counter);
-	if (should_log) {
-		const char* layout_a = LA == RM ? "RM" : "CM";
-		const char* layout_b = LB == RM ? "RM" : "CM";
-		const char* layout_c = LC == RM ? "RM" : "CM";
-		printf("\n[hipBLAS GEMM #%d] MIXED LAYOUT: %s×%s→%s\n", g_gemm_call_counter, layout_a, layout_b, layout_c);
-		printf("  Dimensions: A[%d,%d] × B[%d,%d] → C[%d,%d]\n", m, k, k, n, m, n);
-		printf("  Strides: A=%d, B=%d, C=%d\n", A.stride(), B.stride(), C.stride());
-		printf("  alpha=%.4f, beta=%.4f\n", alpha, beta);
-		printf("  data_type=%s, compute_type=FP32\n",
-			   cuda_data_type == HIPBLAS_R_32F ? "FP32" : "FP16");
-		
-		// Sample C_before if beta != 0 (accumulation mode)
-		if (beta != 0.0f) {
-			sample_matrix_values(stream, C.data(), m, n, "C_before");
-		}
-	}
-#endif
-	
+
 	// For mixed layouts, we need to carefully handle the transpose operations
 	// hipBLAS is column-major, so we interpret RM matrices as transposed CM matrices
 	
@@ -391,19 +274,7 @@ void cublas_gemm(
 		hipblasOperation_t op_a = LA == RM ? HIPBLAS_OP_N : HIPBLAS_OP_T;
 		hipblasOperation_t op_b = LB == RM ? HIPBLAS_OP_N : HIPBLAS_OP_T;
 		
-#if ENABLE_HIPBLAS_DEBUG_LOGGING
-		if (should_log) {
-			printf("  Output is RM: using transposed computation\n");
-			printf("  op_b=%s, op_a=%s (swapped order)\n", 
-				   op_b == HIPBLAS_OP_N ? "N" : "T",
-				   op_a == HIPBLAS_OP_N ? "N" : "T");
-			printf("  Using stride() directly: A.stride()=%d, B.stride()=%d, C.stride()=%d\n", 
-				   A.stride(), B.stride(), C.stride());
-			sample_matrix_values(stream, A.data(), m, k, "A");
-			sample_matrix_values(stream, B.data(), k, n, "B");
-		}
-#endif
-		
+
 		// Swap the operations to match the swapped matrices
 		// With FP32 compute, always use float* for alpha/beta
 		CUBLAS_CHECK_THROW(hipblasGemmEx(
@@ -423,45 +294,62 @@ void cublas_gemm(
 
 	// v39: Extra anomaly dump for MIXED_RM path regardless of should_log sampling
 	{
-		// Quick check of first up-to-256 elements of C for NaN/Inf
+		// Quick check of first up-to-256 elements of C for NaN/Inf, but keep logging concise
 		const uint32_t sample_count = std::min<uint32_t>(256, (uint32_t)(m * n));
 		std::vector<T> cbuf(sample_count);
 		hipError_t herr = hipMemcpyAsync(cbuf.data(), C.data(), sample_count * sizeof(T), hipMemcpyDeviceToHost, stream);
 		hipStreamSynchronize(stream);
 		if (herr == hipSuccess) {
-			bool has_nan = false, has_inf = false;
+			size_t nan_count = 0, inf_count = 0;
+			// Collect only the first few anomalous values to print
+			std::vector<uint32_t> anom_idx;
+			std::vector<float> anom_val;
+			anom_idx.reserve(5);
+			anom_val.reserve(5);
+
 			for (uint32_t i = 0; i < sample_count; ++i) {
 				float v = (float)cbuf[i];
-				if (std::isnan(v)) { has_nan = true; break; }
-				if (std::isinf(v)) { has_inf = true; break; }
+				if (std::isnan(v)) {
+					++nan_count;
+					if (anom_idx.size() < 5) { anom_idx.push_back(i); anom_val.push_back(v); }
+				} else if (std::isinf(v)) {
+					++inf_count;
+					if (anom_idx.size() < 5) { anom_idx.push_back(i); anom_val.push_back(v); }
+				}
 			}
-			if (has_nan || has_inf) {
+
+			if (nan_count > 0 || inf_count > 0) {
 				const char* op_a_name = (LA == RM ? "N" : "T");
 				const char* op_b_name = (LB == RM ? "N" : "T");
 				const char* dtype_name = (cuda_data_type == HIPBLAS_R_32F ? "FP32" : "FP16");
-				printf("[v39 MIXED_RM GEMM ANOMALY]\n");
-				printf("  dims: m=%d n=%d k=%d (RM output)\n", m, n, k);
-				printf("  ops : op_b=%s op_a=%s (hipblasEx called with B then A)\n", op_b_name, op_a_name);
-				printf("  lda/ldb/ldc: B.stride()=%d A.stride()=%d C.stride()=%d\n", B.stride(), A.stride(), C.stride());
-				printf("  alpha=%.6f beta=%.6f dtype=%s compute=FP32 algo=%d\n", alpha, beta, dtype_name, (int)algo);
-				printf("  ptrs: A=%p B=%p C=%p stream=%p\n", (void*)A.data(), (void*)B.data(), (void*)C.data(), (void*)stream);
 
-				// Sample a few A/B values to help diagnose transpose/stride issues
-				const uint32_t sA = std::min<uint32_t>(32, (uint32_t)(m * k));
-				const uint32_t sB = std::min<uint32_t>(32, (uint32_t)(k * n));
-				std::vector<T> abuf(sA), bbuf(sB);
-				if (hipMemcpyAsync(abuf.data(), A.data(), sA * sizeof(T), hipMemcpyDeviceToHost, stream) == hipSuccess &&
-				    hipMemcpyAsync(bbuf.data(), B.data(), sB * sizeof(T), hipMemcpyDeviceToHost, stream) == hipSuccess) {
-					hipStreamSynchronize(stream);
-					printf("  A[0:8]: ");
-					for (uint32_t i = 0; i < std::min<uint32_t>(8, sA); ++i) printf("%.4f ", (float)abuf[i]);
-					printf("\n");
-					printf("  B[0:8]: ");
-					for (uint32_t i = 0; i < std::min<uint32_t>(8, sB); ++i) printf("%.4f ", (float)bbuf[i]);
-					printf("\n");
-					printf("  C[0:8]: ");
-					for (uint32_t i = 0; i < std::min<uint32_t>(8, sample_count); ++i) printf("%.4f ", (float)cbuf[i]);
-					printf("\n");
+				// Cap total anomaly logs for this path to avoid spam
+				static int g_mixed_rm_anomaly_logs = 0;
+				constexpr int MAX_MIXED_RM_ANOM_LOGS = 5;
+
+				if (g_mixed_rm_anomaly_logs < MAX_MIXED_RM_ANOM_LOGS) {
+					++g_mixed_rm_anomaly_logs;
+
+					// Single summary line + at most one line of anomaly values
+					printf("[v39 MIXED_RM GEMM ANOMALY %d/%d] m=%d n=%d k=%d, op_b=%s op_a=%s, lda/ldb/ldc=%d/%d/%d, alpha=%.6f beta=%.6f, dtype=%s compute=FP32 algo=%d, NaN=%zu Inf=%zu\n",
+						g_mixed_rm_anomaly_logs, MAX_MIXED_RM_ANOM_LOGS,
+						m, n, k, op_b_name, op_a_name,
+						B.stride(), A.stride(), C.stride(),
+						alpha, beta, dtype_name, (int)algo,
+						nan_count, inf_count
+					);
+
+					if (!anom_idx.empty()) {
+						printf("  C anomalies (first %zu): ", anom_idx.size());
+						for (size_t j = 0; j < anom_idx.size(); ++j) {
+							printf("(%u:%.4f) ", anom_idx[j], anom_val[j]);
+						}
+						printf("\n");
+					}
+
+					if (g_mixed_rm_anomaly_logs == MAX_MIXED_RM_ANOM_LOGS) {
+						printf("  [MIXED_RM] further anomaly logs suppressed (cap=%d)\n", MAX_MIXED_RM_ANOM_LOGS);
+					}
 				}
 			}
 		} else {
@@ -474,19 +362,7 @@ void cublas_gemm(
 		hipblasOperation_t op_a = LA == RM ? HIPBLAS_OP_T : HIPBLAS_OP_N;
 		hipblasOperation_t op_b = LB == RM ? HIPBLAS_OP_T : HIPBLAS_OP_N;
 		
-#if ENABLE_HIPBLAS_DEBUG_LOGGING
-		if (should_log) {
-			printf("  Output is CM: using standard computation\n");
-			printf("  op_a=%s, op_b=%s\n", 
-				   op_a == HIPBLAS_OP_N ? "N" : "T",
-				   op_b == HIPBLAS_OP_N ? "N" : "T");
-			printf("  Using stride() directly: A.stride()=%d, B.stride()=%d, C.stride()=%d\n",
-				   A.stride(), B.stride(), C.stride());
-			sample_matrix_values(stream, A.data(), m, k, "A");
-			sample_matrix_values(stream, B.data(), k, n, "B");
-		}
-#endif
-		
+	
 		// With FP32 compute, always use float* for alpha/beta
 		CUBLAS_CHECK_THROW(hipblasGemmEx(
 			cublas_handle(),
@@ -505,20 +381,6 @@ void cublas_gemm(
 #endif
 	}
 
-#if ENABLE_HIPBLAS_DEBUG_LOGGING
-	if (should_log) {
-		sample_matrix_values(stream, C.data(), m, n, "C_output");
-		// Check for NaN in output
-		std::vector<T> check_sample(1);
-		CUDA_CHECK_THROW(hipMemcpyAsync(check_sample.data(), C.data(), sizeof(T), hipMemcpyDeviceToHost, stream));
-		CUDA_CHECK_THROW(hipStreamSynchronize(stream));
-		if (std::isnan((float)check_sample[0])) {
-			printf("  🔴 CRITICAL: NaN detected in MIXED LAYOUT output at GEMM #%d!\n", g_gemm_call_counter);
-			printf("  Operation: %s×%s→%s with beta=%.4f\n", 
-				   LA == RM ? "RM" : "CM", LB == RM ? "RM" : "CM", LC == RM ? "RM" : "CM", beta);
-		}
-	}
-#endif
 }
 
 

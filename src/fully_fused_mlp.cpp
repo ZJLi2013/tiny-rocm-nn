@@ -803,22 +803,6 @@ std::enable_if_t<std::is_same<__half, T>::value> mlp_fused_forward(
 	__half* first_layer_post_gpu_buffer = nullptr ;
 	__half* first_layer_post_host_buffer = nullptr ; 
 
-	// v37: Path selection audit (based on original layout vs mapped layout)
-	{
-		rocwmma::layout_t mapped_input_layout = (input.layout() == RM) ? rocwmma::mem_col_major : rocwmma::mem_row_major;
-		bool will_use_dynamic = (mapped_input_layout == rocwmma::mem_col_major) || (in_width != WIDTH);
-
-		const char* orig_layout = (input.layout() == RM) ? "RM" : "CM";
-		const char* mapped_name = (mapped_input_layout == rocwmma::mem_col_major) ? "mem_col_major" : "mem_row_major";
-		const char* branch = will_use_dynamic ? "dynamic" : "static";
-
-		static int s_path_calls = 0;
-		++s_path_calls;
-		if (s_path_calls <= 5 || (s_path_calls % 500) == 0) {
-			printf("[v37 PATH] call=%d orig=%s mapped=%s in_width=%u WIDTH=%u branch=%s\n",
-				s_path_calls, orig_layout, mapped_name, in_width, WIDTH, branch);
-		}
-	}
 
 	check_shmem_error(hipFuncSetAttribute(reinterpret_cast<const void*>(kernel_mlp_fused<WIDTH, N_ITERS, __half, ACTIVATION, INFERENCE>), hipFuncAttributeMaxDynamicSharedMemorySize, (int)shmem_size));
 	kernel_mlp_fused<WIDTH, N_ITERS, __half, ACTIVATION, INFERENCE><<<blocks, threads, shmem_size, stream>>>(
