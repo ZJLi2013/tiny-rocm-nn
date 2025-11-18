@@ -151,8 +151,10 @@ __device__ void v41_compare_input_tile(const __half* __restrict__ act_shmem, con
 			}
 		}
 
+	if (mismatches > 0) {
 		printf("[v41 A-compare] rows=%u cols=%u skew=%u samples=%d mismatches=%d shmem(NaN=%d,Inf=%d,max=%.2f) gmem(NaN=%d,Inf=%d,max=%.2f)\n",
 			   rows, cols, SKEW, samples, mismatches, nanA, infA, maxA, nanG, infG, maxG);
+	}
 	}
 }
 
@@ -175,8 +177,10 @@ __device__ void v41_sample_weights_tile(const __half* __restrict__ weights, uint
 			}
 		}
 
+	if (nan > 0 || inf > 0) {
 		printf("[v41 B-sample] WIDTH=%u in_width=%u ld=%u tile=16x16 NaN=%d Inf=%d max=%.2f\n",
 			   WIDTH, in_width, ld, nan, inf, max_abs);
+	}
 	}
 }
 
