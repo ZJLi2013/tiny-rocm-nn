@@ -137,6 +137,8 @@ target_link_libraries(tiny-rocm-nn PUBLIC hip::device hip::host roc::rocblas roc
 if (TCNN_BUILD_EXAMPLES)
 	add_subdirectory("samples")
 endif()
+
+add_subdirectory("test")
 if (TCNN_BUILD_BENCHMARK)
 	add_subdirectory("benchmarks/image")
 endif()
