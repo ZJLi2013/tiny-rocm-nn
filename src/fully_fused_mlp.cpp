@@ -211,12 +211,15 @@ __device__ void threadblock_layer(Activation activation, __half* __restrict__ ac
 			if (blockIdx.x == 0 && threadIdx.x == 0 && threadIdx.y == 0) {
 				const uint32_t SAMPLE_SIZE = (16u * (WIDTH + SKEW)) < 256u ? (16u * (WIDTH + SKEW)) : 256u;
 				const __half* base_pre = act_shmem + weights_col + l * 16 * (WIDTH + SKEW);
-				for (uint32_t i_s = 0; i_s < SAMPLE_SIZE; ++i_s) {
-					float v = __half2float(base_pre[i_s]);
-					if (isnan(v)) ++pre_nan;
-					else if (isinf(v)) ++pre_inf;
-					float a = fabsf(v);
-					if (a > pre_max) pre_max = a;
+				// v42-fix: sample strictly within this wave's 16x16 tile to avoid reading uninitialized neighbors
+				for (uint32_t rr = 0; rr < 16u; ++rr) {
+					for (uint32_t cc = 0; cc < 16u; ++cc) {
+						float v = __half2float(base_pre[rr * (WIDTH + SKEW) + cc]);
+						if (isnan(v)) ++pre_nan;
+						else if (isinf(v)) ++pre_inf;
+						float a = fabsf(v);
+						if (a > pre_max) pre_max = a;
+					}
 				}
 			}
 			__syncthreads();
@@ -232,12 +235,15 @@ __device__ void threadblock_layer(Activation activation, __half* __restrict__ ac
 				float post_max = 0.0f;
 				const uint32_t SAMPLE_SIZE = (16u * (WIDTH + SKEW)) < 256u ? (16u * (WIDTH + SKEW)) : 256u;
 				const __half* base_post = act_shmem + weights_col + l * 16 * (WIDTH + SKEW);
-				for (uint32_t i_s = 0; i_s < SAMPLE_SIZE; ++i_s) {
-					float v = __half2float(base_post[i_s]);
-					if (isnan(v)) ++post_nan;
-					else if (isinf(v)) ++post_inf;
-					float a = fabsf(v);
-					if (a > post_max) post_max = a;
+				// v42-fix: sample strictly within this wave's 16x16 tile to avoid reading uninitialized neighbors
+				for (uint32_t rr = 0; rr < 16u; ++rr) {
+					for (uint32_t cc = 0; cc < 16u; ++cc) {
+						float v = __half2float(base_post[rr * (WIDTH + SKEW) + cc]);
+						if (isnan(v)) ++post_nan;
+						else if (isinf(v)) ++post_inf;
+						float a = fabsf(v);
+						if (a > post_max) post_max = a;
+					}
 				}
 				const bool pre_anom = (pre_nan > 0) || (pre_inf > 0);
 				const bool post_anom = (post_nan > 0) || (post_inf > 0);
