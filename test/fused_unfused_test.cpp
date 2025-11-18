@@ -134,17 +134,17 @@ int main(int argc, char** argv) {
         GPUMatrixDynamic<__half> unfused_output(WIDTH, BATCH_SIZE, RM);
 
         // Layer 0: input -> layer0_out (with ReLU)
-        fc_multiply(hipStreamDefault, W0.transposed(), input.rm(), layer0_out.rm(), ACTIVATION);
+        fc_multiply(hipStreamDefault, W0.transposed(), input, layer0_out, ACTIVATION);
         CUDA_CHECK_THROW(hipStreamSynchronize(hipStreamDefault));
         std::cout << "    Layer 0 completed" << std::endl;
 
         // Layer 1: layer0_out -> layer1_out (with ReLU)
-        fc_multiply(hipStreamDefault, W1.transposed(), layer0_out.rm(), layer1_out.rm(), ACTIVATION);
+        fc_multiply(hipStreamDefault, W1.transposed(), layer0_out, layer1_out, ACTIVATION);
         CUDA_CHECK_THROW(hipStreamSynchronize(hipStreamDefault));
         std::cout << "    Layer 1 completed" << std::endl;
 
         // Layer 2: layer1_out -> unfused_output (no activation)
-        fc_multiply(hipStreamDefault, W2.transposed(), layer1_out.rm(), unfused_output.rm(), Activation::None);
+        fc_multiply(hipStreamDefault, W2.transposed(), layer1_out, unfused_output, Activation::None);
         CUDA_CHECK_THROW(hipStreamSynchronize(hipStreamDefault));
         std::cout << "    Layer 2 completed" << std::endl;
 
