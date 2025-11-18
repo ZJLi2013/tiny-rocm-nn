@@ -8,7 +8,8 @@
 #include <tiny-cuda-nn/common.h>
 #include <tiny-cuda-nn/gpu_matrix.h>
 #include <tiny-cuda-nn/networks/fully_fused_mlp.h>
-#include <tiny-cuda-nn/misc.h>
+#include <tiny-cuda-nn/random.h>
+#include <tiny-cuda-nn/cublas_matmul.h>
 
 #include <iostream>
 #include <stdexcept>
