@@ -53,7 +53,7 @@ namespace tcnn {
 	} while(0)
 
 // Debug logging control
-#define ENABLE_HIPBLAS_DEBUG_LOGGING 1
+#define ENABLE_HIPBLAS_DEBUG_LOGGING 0
 #define MAX_DEBUG_GEMM_CALLS 100  // Only log first 100 GEMM calls to reduce verbosity
 
 #if ENABLE_HIPBLAS_DEBUG_LOGGING
@@ -115,149 +115,6 @@ void sample_matrix_stats(hipStream_t stream, const T* data, uint32_t m, uint32_t
 		}
 	}
 }
-#if ENABLE_HIPBLAS_DEBUG_LOGGING
-// Dump-once control for A/B/C_before anomaly
-static int g_first_abcbefore_dump_done = 0;
-// Optional: force a single dump at the first MIXED_RM GEMM, regardless of anomaly.
-// Enable via environment variable TNN_DUMP_ONCE_FORCE=1
-static bool g_dump_force_once = []() {
-	const char* s = std::getenv("TNN_DUMP_ONCE_FORCE");
-	return s && (s[0]=='1' || s[0]=='T' || s[0]=='t' || s[0]=='y' || s[0]=='Y');
-}();
-
-	// Write binary dump using C stdio (minimal dependency)
-template <typename T>
-void dump_binary(const char* filename, const std::vector<T>& buf) {
-	FILE* f = fopen(filename, "wb");
-	if (!f) {
-		printf("  [dump] fopen failed: %s\n", filename);
-		return;
-	}
-	fwrite(buf.data(), sizeof(T), buf.size(), f);
-	fclose(f);
-}
-
-
-// Build dump path with optional env overrides:
-// - TNN_DUMP_DIR: directory prefix (no auto-create)
-// - TNN_DUMP_TAG: suffix tag inserted before extension
-inline void make_dump_path(char* out, size_t out_size, const char* prefix, const char* base, const char* ext) {
-	const char* dir_env = std::getenv("TNN_DUMP_DIR");
-	const char* tag_env = std::getenv("TNN_DUMP_TAG");
-
-	const bool has_dir = (dir_env && dir_env[0] != '\0');
-	const bool has_tag = (tag_env && tag_env[0] != '\0');
-
-	if (has_dir) {
-		// Ensure single separator
-		size_t len = std::strlen(dir_env);
-		bool need_sep = len > 0 && (dir_env[len-1] != '/' && dir_env[len-1] != '\\');
-		if (has_tag) {
-			snprintf(out, out_size, "%s%s%s%s%s%s",
-				dir_env, need_sep ? "/" : "", prefix, base, tag_env, ext);
-		} else {
-			snprintf(out, out_size, "%s%s%s%s%s",
-				dir_env, need_sep ? "/" : "", prefix, base, ext);
-		}
-	} else {
-		if (has_tag) {
-			snprintf(out, out_size, "%s%s%s%s", prefix, base, tag_env, ext);
-		} else {
-			snprintf(out, out_size, "%s%s%s", prefix, base, ext);
-		}
-	}
-}
-
-// Minimal metadata dump to accompany tensor dumps
-inline void dump_meta(const char* filename, const char* tag,
-	int m, int n, int k,
-	hipblasOperation_t op_a, hipblasOperation_t op_b,
-	int lda, int ldb, int ldc,
-	float alpha, float beta,
-	const void* A_ptr, const void* B_ptr, const void* C_ptr,
-	hipblasComputeType_t compute_type, hipDataType dtype, hipblasGemmAlgo_t algo
-) {
-	const char* op_name_a = (op_a == HIPBLAS_OP_N ? "N" : (op_a == HIPBLAS_OP_T ? "T" : "C"));
-	const char* op_name_b = (op_b == HIPBLAS_OP_N ? "N" : (op_b == HIPBLAS_OP_T ? "T" : "C"));
-	const char* dtype_name = (dtype == HIPBLAS_R_32F ? "FP32" : (dtype == HIPBLAS_R_16F ? "FP16" : "UNKNOWN"));
-
-	FILE* f = fopen(filename, "w");
-	if (!f) {
-		printf("  [meta] fopen failed: %s\n", filename);
-		return;
-	}
-	fprintf(f, "tag=%s\n", tag);
-	fprintf(f, "m=%d n=%d k=%d\n", m, n, k);
-	fprintf(f, "op_a=%s op_b=%s\n", op_name_a, op_name_b);
-	fprintf(f, "lda=%d ldb=%d ldc=%d\n", lda, ldb, ldc);
-	fprintf(f, "alpha=%.8f beta=%.8f\n", alpha, beta);
-	fprintf(f, "A_ptr=%p B_ptr=%p C_ptr=%p\n", A_ptr, B_ptr, C_ptr);
-	fprintf(f, "compute_type=FP32 dtype=%s algo=%d\n", dtype_name, (int)algo);
-	fclose(f);
-}
-
-	// Detect anomaly by sampling a small prefix first. Only if anomaly is found,
-	// perform a full-device-to-host copy and dump once.
-template <typename T>
-bool stats_and_dump_once(hipStream_t stream, const T* data, uint32_t m, uint32_t n, const char* tag, const char* prefix) {
-	if (g_first_abcbefore_dump_done) return false;
-
-	const size_t total = (size_t)m * (size_t)n;
-	const uint32_t sample_count = std::min<uint32_t>(256, (uint32_t)total);
-
-	// Step 1: small sample to detect anomaly cheaply
-	std::vector<T> sample(sample_count);
-	hipError_t herr = hipMemcpyAsync(sample.data(), data, sample_count * sizeof(T), hipMemcpyDeviceToHost, stream);
-	hipStreamSynchronize(stream);
-	if (herr != hipSuccess) {
-		printf("  [dump] hipMemcpyAsync(sample %s) failed: %d\n", tag, (int)herr);
-		return false;
-	}
-
-	size_t nan_count = 0, inf_count = 0;
-	float max_abs = 0.0f;
-	for (uint32_t i = 0; i < sample_count; ++i) {
-		float v = (float)sample[i];
-		if (std::isnan(v)) ++nan_count;
-		else if (std::isinf(v)) ++inf_count;
-		float a = std::fabs(v);
-		if (a > max_abs) max_abs = a;
-	}
-
-	// No anomaly detected in sample: do nothing
-	if (nan_count == 0 && inf_count == 0) {
-		return false;
-	}
-
-	// Step 2: anomaly detected — copy full tensor and dump (once)
-	std::vector<T> buf(total);
-	herr = hipMemcpyAsync(buf.data(), data, total * sizeof(T), hipMemcpyDeviceToHost, stream);
-	hipStreamSynchronize(stream);
-	if (herr != hipSuccess) {
-		printf("  [dump] hipMemcpyAsync(full %s) failed: %d\n", tag, (int)herr);
-		return false;
-	}
-
-	// Recompute stats on full buffer for accurate reporting
-	size_t fnan = 0, finf = 0;
-	float fmax = 0.0f;
-	for (size_t i = 0; i < total; ++i) {
-		float v = (float)buf[i];
-		if (std::isnan(v)) ++fnan;
-		else if (std::isinf(v)) ++finf;
-		float a = std::fabs(v);
-		if (a > fmax) fmax = a;
-	}
-	printf("  %s[%dx%d] BEFORE stats: NaN=%zu Inf=%zu max=%.6f\n", tag, (int)m, (int)n, fnan, finf, fmax);
-
-	char fname[512];
-	make_dump_path(fname, sizeof(fname), prefix, tag, ".bin");
-	dump_binary(fname, buf);
-	g_first_abcbefore_dump_done = 1;
-	printf("  [dump-once] wrote %s (%zu elements)\n", fname, total);
-	return true;
-}
-#endif
 
 inline hipblasHandle_t& cublas_handle() {
 	static hipblasHandle_t handle;
@@ -420,104 +277,6 @@ void cublas_gemm(
 
 		// Swap the operations to match the swapped matrices
 		// With FP32 compute, always use float* for alpha/beta
-#if ENABLE_HIPBLAS_DEBUG_LOGGING
-		// Pre-GEMM: dump A/B/C_before when anomaly detected or forced
-		if (!g_first_abcbefore_dump_done) {
-			// First check C_after from previous call to detect anomaly
-			bool has_anomaly = false;
-			{
-				const uint32_t sample_count = std::min<uint32_t>(256, (uint32_t)(m * n));
-				std::vector<T> csample(sample_count);
-				hipError_t herr = hipMemcpyAsync(csample.data(), C.data(), sample_count * sizeof(T), hipMemcpyDeviceToHost, stream);
-				hipStreamSynchronize(stream);
-				if (herr == hipSuccess) {
-					for (uint32_t i = 0; i < sample_count; ++i) {
-						float v = (float)csample[i];
-						if (std::isnan(v) || std::isinf(v)) {
-							has_anomaly = true;
-							break;
-						}
-					}
-				}
-			}
-
-			// Dump if forced or anomaly detected
-			if (g_dump_force_once || has_anomaly) {
-				printf("  [dump-once] Dumping A/B/C_before (force=%d anomaly=%d)\n", g_dump_force_once, has_anomaly);
-				
-				// Dump all three matrices
-				std::vector<T> abuf((size_t)A.m() * (size_t)A.n());
-				std::vector<T> bbuf((size_t)B.m() * (size_t)B.n());
-				std::vector<T> cbuf((size_t)C.m() * (size_t)C.n());
-				
-				hipError_t herr_a = hipMemcpyAsync(abuf.data(), A.data(), abuf.size() * sizeof(T), hipMemcpyDeviceToHost, stream);
-				hipError_t herr_b = hipMemcpyAsync(bbuf.data(), B.data(), bbuf.size() * sizeof(T), hipMemcpyDeviceToHost, stream);
-				hipError_t herr_c = hipMemcpyAsync(cbuf.data(), C.data(), cbuf.size() * sizeof(T), hipMemcpyDeviceToHost, stream);
-				hipStreamSynchronize(stream);
-
-				if (herr_a == hipSuccess && herr_b == hipSuccess && herr_c == hipSuccess) {
-					// Compute stats for all three
-					size_t nan_a = 0, inf_a = 0, nan_b = 0, inf_b = 0, nan_c = 0, inf_c = 0;
-					float max_a = 0.0f, max_b = 0.0f, max_c = 0.0f;
-					
-					for (size_t i = 0; i < abuf.size(); ++i) {
-						float v = (float)abuf[i];
-						if (std::isnan(v)) ++nan_a;
-						else if (std::isinf(v)) ++inf_a;
-						float a = std::fabs(v);
-						if (a > max_a) max_a = a;
-					}
-					
-					for (size_t i = 0; i < bbuf.size(); ++i) {
-						float v = (float)bbuf[i];
-						if (std::isnan(v)) ++nan_b;
-						else if (std::isinf(v)) ++inf_b;
-						float a = std::fabs(v);
-						if (a > max_b) max_b = a;
-					}
-					
-					for (size_t i = 0; i < cbuf.size(); ++i) {
-						float v = (float)cbuf[i];
-						if (std::isnan(v)) ++nan_c;
-						else if (std::isinf(v)) ++inf_c;
-						float a = std::fabs(v);
-						if (a > max_c) max_c = a;
-					}
-
-					printf("  A_before[%dx%d]: NaN=%zu Inf=%zu max=%.6f\n", A.m(), A.n(), nan_a, inf_a, max_a);
-					printf("  B_before[%dx%d]: NaN=%zu Inf=%zu max=%.6f\n", B.m(), B.n(), nan_b, inf_b, max_b);
-					printf("  C_before[%dx%d]: NaN=%zu Inf=%zu max=%.6f\n", C.m(), C.n(), nan_c, inf_c, max_c);
-
-					// Dump binary files
-					char pA[512], pB[512], pC[512], pM[512];
-					const char* prefix = g_dump_force_once ? "mixed_rm_force_" : "mixed_rm_first_";
-					make_dump_path(pA, sizeof(pA), prefix, "A_before", ".bin");
-					make_dump_path(pB, sizeof(pB), prefix, "B_before", ".bin");
-					make_dump_path(pC, sizeof(pC), prefix, "C_before", ".bin");
-					make_dump_path(pM, sizeof(pM), prefix, "meta", ".txt");
-					
-					dump_binary(pA, abuf);
-					dump_binary(pB, bbuf);
-					dump_binary(pC, cbuf);
-					dump_meta(pM, g_dump_force_once ? "force" : "anomaly",
-						m, n, k, op_a, op_b,
-						A.stride(), B.stride(), C.stride(),
-						alpha, beta,
-						(const void*)A.data(), (const void*)B.data(), (const void*)C.data(),
-						compute_type, cuda_data_type, algo
-					);
-					
-					printf("  [dump-once] wrote %s, %s, %s, %s\n", pA, pB, pC, pM);
-				} else {
-					printf("  [dump-once] hipMemcpy failed: A=%d B=%d C=%d\n", (int)herr_a, (int)herr_b, (int)herr_c);
-				}
-				
-				g_dump_force_once = false;
-				g_first_abcbefore_dump_done = 1;
-			}
-		}
-#endif
-
 		CUBLAS_CHECK_THROW(hipblasGemmEx(
 			cublas_handle(),
 			op_b, op_a,
@@ -532,38 +291,9 @@ void cublas_gemm(
 		));
 #if ENABLE_HIPBLAS_DEBUG_LOGGING
 	sample_matrix_stats(stream, C.data(), m, n, "C_stats_MIXED_RM");
-
-	// Dump C_after if we dumped A/B/C_before
-	if (g_first_abcbefore_dump_done == 1) {
-		std::vector<T> c_after_buf((size_t)C.m() * (size_t)C.n());
-		hipError_t herr = hipMemcpyAsync(c_after_buf.data(), C.data(), c_after_buf.size() * sizeof(T), hipMemcpyDeviceToHost, stream);
-		hipStreamSynchronize(stream);
-		
-		if (herr == hipSuccess) {
-			size_t nan_count = 0, inf_count = 0;
-			float max_abs = 0.0f;
-			for (size_t i = 0; i < c_after_buf.size(); ++i) {
-				float v = (float)c_after_buf[i];
-				if (std::isnan(v)) ++nan_count;
-				else if (std::isinf(v)) ++inf_count;
-				float a = std::fabs(v);
-				if (a > max_abs) max_abs = a;
-			}
-			
-			printf("  C_after[%dx%d]: NaN=%zu Inf=%zu max=%.6f\n", C.m(), C.n(), nan_count, inf_count, max_abs);
-			
-			char pC_after[512];
-			make_dump_path(pC_after, sizeof(pC_after), "mixed_rm_first_", "C_after", ".bin");
-			dump_binary(pC_after, c_after_buf);
-			printf("  [dump-once] wrote %s\n", pC_after);
-			
-			g_first_abcbefore_dump_done = 2;  // Mark as fully complete
-		}
-	}
 #endif
 
 #if ENABLE_HIPBLAS_DEBUG_LOGGING
-	// v39: Extra anomaly dump for MIXED_RM path regardless of should_log sampling
 	{
 		// Quick check of first up-to-256 elements of C for NaN/Inf, but keep logging concise
 		const uint32_t sample_count = std::min<uint32_t>(256, (uint32_t)(m * n));
