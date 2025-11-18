@@ -64,7 +64,7 @@ bool check_matrices_equal(const GPUMatrix<T, RM>& mat1, const GPUMatrix<T, RM>& 
 int main(int argc, char** argv) {
     try {
         // Test parameters
-        const uint32_t BATCH_SIZE = 128;  // Reduced for simpler debugging
+        const uint32_t BATCH_SIZE = 256;  // Must be multiple of BATCH_SIZE_GRANULARITY (256)
         const uint32_t WIDTH = 64;
         const uint32_t N_HIDDEN_LAYERS = 2;
         const Activation ACTIVATION = Activation::ReLU;
@@ -154,25 +154,41 @@ int main(int argc, char** argv) {
         // --- 3. Compare Results ---
         std::cout << "\n[3] Comparing last hidden layer outputs..." << std::endl;
         
-        // Convert fused output to RM for comparison
-        GPUMatrix<__half, RM> fused_last_hidden_rm(WIDTH, BATCH_SIZE);
-        CUDA_CHECK_THROW(hipMemcpy2DAsync(
-            fused_last_hidden_rm.data(), fused_last_hidden_rm.stride() * sizeof(__half),
-            fused_last_hidden.data(), fused_last_hidden.stride() * sizeof(__half),
-            WIDTH * sizeof(__half), BATCH_SIZE,
-            hipMemcpyDeviceToDevice, hipStreamDefault
-        ));
+        // Both are CM layout, compare directly by copying to host
+        std::vector<__half> h_fused(WIDTH * BATCH_SIZE);
+        std::vector<__half> h_unfused(WIDTH * BATCH_SIZE);
         
-        GPUMatrix<__half, RM> layer1_out_rm(WIDTH, BATCH_SIZE);
-        CUDA_CHECK_THROW(hipMemcpy2DAsync(
-            layer1_out_rm.data(), layer1_out_rm.stride() * sizeof(__half),
-            layer1_out.data(), layer1_out.stride() * sizeof(__half),
-            WIDTH * sizeof(__half), BATCH_SIZE,
-            hipMemcpyDeviceToDevice, hipStreamDefault
-        ));
-        CUDA_CHECK_THROW(hipStreamSynchronize(hipStreamDefault));
-
-        bool success = check_matrices_equal(fused_last_hidden_rm, layer1_out_rm);
+        CUDA_CHECK_THROW(hipMemcpy(h_fused.data(), fused_last_hidden.data(), 
+                                    WIDTH * BATCH_SIZE * sizeof(__half), hipMemcpyDeviceToHost));
+        CUDA_CHECK_THROW(hipMemcpy(h_unfused.data(), layer1_out.data(), 
+                                    WIDTH * BATCH_SIZE * sizeof(__half), hipMemcpyDeviceToHost));
+        
+        // Compare element by element
+        size_t mismatch_count = 0;
+        float max_diff = 0.0f;
+        size_t first_mismatch_idx = 0;
+        
+        for (size_t i = 0; i < h_fused.size(); ++i) {
+            float v1 = __half2float(h_fused[i]);
+            float v2 = __half2float(h_unfused[i]);
+            float diff = std::abs(v1 - v2);
+            
+            if (diff > 1e-2f) {
+                if (mismatch_count == 0) {
+                    first_mismatch_idx = i;
+                }
+                mismatch_count++;
+                max_diff = std::max(max_diff, diff);
+            }
+        }
+        
+        bool success = (mismatch_count == 0);
+        
+        if (mismatch_count > 0) {
+            std::cerr << "Mismatch: " << mismatch_count << "/" << h_fused.size() 
+                      << " elements, max_diff=" << max_diff 
+                      << ", first at idx=" << first_mismatch_idx << std::endl;
+        }
 
         if (success) {
             std::cout << "\n✓ SUCCESS: Fused and unfused outputs match!" << std::endl;
@@ -180,22 +196,15 @@ int main(int argc, char** argv) {
         } else {
             std::cerr << "\n✗ FAILURE: Fused and unfused outputs differ!" << std::endl;
             
-            // Print sample values for debugging
-            std::vector<__half> h_fused(std::min<size_t>(16, fused_last_hidden_rm.n_elements()));
-            std::vector<__half> h_unfused(std::min<size_t>(16, layer1_out_rm.n_elements()));
-            CUDA_CHECK_THROW(hipMemcpy(h_fused.data(), fused_last_hidden_rm.data(), 
-                                        h_fused.size() * sizeof(__half), hipMemcpyDeviceToHost));
-            CUDA_CHECK_THROW(hipMemcpy(h_unfused.data(), layer1_out_rm.data(), 
-                                        h_unfused.size() * sizeof(__half), hipMemcpyDeviceToHost));
-            
+            // Print first 16 elements for debugging
             std::cout << "First 16 elements:" << std::endl;
             std::cout << "Fused:   ";
-            for (size_t i = 0; i < h_fused.size(); ++i) {
+            for (size_t i = 0; i < 16 && i < h_fused.size(); ++i) {
                 std::cout << __half2float(h_fused[i]) << " ";
             }
             std::cout << std::endl;
             std::cout << "Unfused: ";
-            for (size_t i = 0; i < h_unfused.size(); ++i) {
+            for (size_t i = 0; i < 16 && i < h_unfused.size(); ++i) {
                 std::cout << __half2float(h_unfused[i]) << " ";
             }
             std::cout << std::endl;
