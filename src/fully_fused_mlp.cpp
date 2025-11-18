@@ -114,76 +114,6 @@ __device__ void check_shmem_input(const __half* __restrict__ act_shmem, const ch
 	}
 }
 
-// v41: Compare GEMM A tile in shmem vs direct global read (static input path)
-template <int WIDTH, int N_ITERS>
-__device__ void v41_compare_input_tile(const __half* __restrict__ act_shmem, const __half* __restrict__ input_threadblock) {
-	if (blockIdx.x == 0 && threadIdx.x == 0 && threadIdx.y == 0) {
-		constexpr uint32_t SKEW = WIDTH % 16 == 0 ? 8 : 0;
-		const uint32_t rows = 16u * N_ITERS;
-		const uint32_t cols = WIDTH;
-
-		// Limit sampling to reduce overhead
-		const uint32_t max_rows = rows < 32u ? rows : 32u;
-		const uint32_t max_cols = cols < 128u ? cols : 128u;
-
-		int samples = 0;
-		int mismatches = 0;
-		int nanA = 0, nanG = 0, infA = 0, infG = 0;
-		float maxA = 0.0f, maxG = 0.0f;
-
-		for (uint32_t r = 0; r < max_rows; ++r) {
-			for (uint32_t c = 0; c < max_cols; c += 8) {
-				const int4 shv = *(const int4*)&act_shmem[r * (WIDTH + SKEW) + c];
-				const int4 gv  = *(const int4*)&input_threadblock[r * WIDTH + c];
-				if (shv.x != gv.x || shv.y != gv.y || shv.z != gv.z || shv.w != gv.w) {
-					mismatches++;
-				}
-				// Quick stats from the first half in the chunk
-				const __half* shh = reinterpret_cast<const __half*>(&shv);
-				const __half* ghh = reinterpret_cast<const __half*>(&gv);
-				float a0 = __half2float(shh[0]);
-				float g0 = __half2float(ghh[0]);
-				if (isnan(a0)) nanA++; if (isinf(a0)) infA++;
-				if (isnan(g0)) nanG++; if (isinf(g0)) infG++;
-				maxA = fmaxf(maxA, fabsf(a0));
-				maxG = fmaxf(maxG, fabsf(g0));
-				samples++;
-			}
-		}
-
-	if (mismatches > 0) {
-		printf("[v41 A-compare] rows=%u cols=%u skew=%u samples=%d mismatches=%d shmem(NaN=%d,Inf=%d,max=%.2f) gmem(NaN=%d,Inf=%d,max=%.2f)\n",
-			   rows, cols, SKEW, samples, mismatches, nanA, infA, maxA, nanG, infG, maxG);
-	}
-	}
-}
-
-// v41: Sample first-layer B weights tile (col_major view) for stats
-template <int WIDTH>
-__device__ void v41_sample_weights_tile(const __half* __restrict__ weights, uint32_t in_width) {
-	if (blockIdx.x == 0 && threadIdx.x == 0 && threadIdx.y == 0) {
-		const uint32_t ld = WIDTH; // leading dimension for col_major
-		const uint32_t max_r = 16u;
-		const uint32_t max_c = 16u;
-		int nan = 0, inf = 0;
-		float max_abs = 0.0f;
-
-		for (uint32_t c = 0; c < max_c && c < in_width; ++c) {
-			for (uint32_t r = 0; r < max_r; ++r) {
-				float v = __half2float(weights[r + c * ld]);
-				if (isnan(v)) nan++;
-				else if (isinf(v)) inf++;
-				max_abs = fmaxf(max_abs, fabsf(v));
-			}
-		}
-
-	if (nan > 0 || inf > 0) {
-		printf("[v41 B-sample] WIDTH=%u in_width=%u ld=%u tile=16x16 NaN=%d Inf=%d max=%.2f\n",
-			   WIDTH, in_width, ld, nan, inf, max_abs);
-	}
-	}
-}
-
 template <int WIDTH, int N_ITERS, typename OUT_T, bool BACKWARD=false>
 __device__ void threadblock_layer(Activation activation, __half* __restrict__ act_shmem, const __half* __restrict__ weights_this_layer, OUT_T* __restrict__ out_intermediate_threadblock_this_layer, const OUT_T* __restrict__ activation_aux = nullptr) {
 	// act_shmem contains the intermediate activations (shared memory) of the thread block's chunk of the batch.
@@ -272,7 +202,51 @@ __device__ void threadblock_layer(Activation activation, __half* __restrict__ ac
 			load_matrix_sync(act_frag, activation_aux + weights_col + l * 16 * WIDTH, WIDTH);
 			warp_activation_backward<OUT_T>(activation, result_frag[l], act_frag, result_frag[l]);
 		} else {
+			// v42: pre-/post-activation sampling on forward path (first block & lane 0)
+			// Pre: store pre-activation tile to shmem and sample a small subset
+			store_matrix_sync(act_shmem + weights_col + l * 16 * (WIDTH + SKEW), result_frag[l], WIDTH + SKEW, mem_row_major);
+			__syncthreads();
+			int pre_nan = 0, pre_inf = 0;
+			float pre_max = 0.0f;
+			if (blockIdx.x == 0 && threadIdx.x == 0 && threadIdx.y == 0) {
+				const uint32_t SAMPLE_SIZE = (16u * (WIDTH + SKEW)) < 256u ? (16u * (WIDTH + SKEW)) : 256u;
+				const __half* base_pre = act_shmem + weights_col + l * 16 * (WIDTH + SKEW);
+				for (uint32_t i_s = 0; i_s < SAMPLE_SIZE; ++i_s) {
+					float v = __half2float(base_pre[i_s]);
+					if (isnan(v)) ++pre_nan;
+					else if (isinf(v)) ++pre_inf;
+					float a = fabsf(v);
+					if (a > pre_max) pre_max = a;
+				}
+			}
+			__syncthreads();
+
+			// Activation
 			warp_activation<OUT_T>(activation, result_frag[l], result_frag[l]);
+
+			// Post: store post-activation tile, sample, and only print when diff/anomaly changes
+			store_matrix_sync(act_shmem + weights_col + l * 16 * (WIDTH + SKEW), result_frag[l], WIDTH + SKEW, mem_row_major);
+			__syncthreads();
+			if (blockIdx.x == 0 && threadIdx.x == 0 && threadIdx.y == 0) {
+				int post_nan = 0, post_inf = 0;
+				float post_max = 0.0f;
+				const uint32_t SAMPLE_SIZE = (16u * (WIDTH + SKEW)) < 256u ? (16u * (WIDTH + SKEW)) : 256u;
+				const __half* base_post = act_shmem + weights_col + l * 16 * (WIDTH + SKEW);
+				for (uint32_t i_s = 0; i_s < SAMPLE_SIZE; ++i_s) {
+					float v = __half2float(base_post[i_s]);
+					if (isnan(v)) ++post_nan;
+					else if (isinf(v)) ++post_inf;
+					float a = fabsf(v);
+					if (a > post_max) post_max = a;
+				}
+				const bool pre_anom = (pre_nan > 0) || (pre_inf > 0);
+				const bool post_anom = (post_nan > 0) || (post_inf > 0);
+				const float diff = fabsf(post_max - pre_max);
+				if (pre_anom != post_anom || diff > 1e-3f) {
+					printf("[v42 ACT] it=%d pre(NaN=%d,Inf=%d,max=%.4f) post(NaN=%d,Inf=%d,max=%.4f)\n",
+						l, pre_nan, pre_inf, pre_max, post_nan, post_inf, post_max);
+				}
+			}
 		}
 	}
 
@@ -729,13 +703,6 @@ __global__ void kernel_mlp_fused(const Activation output_activation, const __hal
 			check_shmem_input<WIDTH, N_ITERS>(act_shmem, "RawInput", 0);
 		}
 
-		// v41: A/B entry alignment instrumentation (only first block & thread)
-		if (!INFERENCE && blockIdx.x == 0 && threadIdx.x == 0 && threadIdx.y == 0) {
-			const __half* gA = input + elem_idx * WIDTH; // direct global view for this threadblock
-			v41_compare_input_tile<WIDTH, N_ITERS>(act_shmem, gA);
-			v41_sample_weights_tile<WIDTH>(weights, in_width);
-		}
-		
 		threadblock_layer<WIDTH, N_ITERS, OUT_T>(ACTIVATION, act_shmem, weights, !INFERENCE ? (out_intermediate + elem_idx * WIDTH) : nullptr);
 		
 		// v33: Check FirstLayer output (after FirstLayer computation)
