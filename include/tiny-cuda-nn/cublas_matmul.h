@@ -562,6 +562,7 @@ void cublas_gemm(
 	}
 #endif
 
+#if ENABLE_HIPBLAS_DEBUG_LOGGING
 	// v39: Extra anomaly dump for MIXED_RM path regardless of should_log sampling
 	{
 		// Quick check of first up-to-256 elements of C for NaN/Inf, but keep logging concise

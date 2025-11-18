@@ -1,5 +1,6 @@
 #include <hip/hip_runtime.h>
-#include <hipblas.h>
+#include <hipblas/hipblas.h>
+#include <hip/hip_fp16.h>
 #include <vector>
 #include <cstdio>
 #include <cmath>

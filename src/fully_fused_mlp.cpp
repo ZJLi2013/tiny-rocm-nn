@@ -963,6 +963,43 @@ std::unique_ptr<Context> FullyFusedMLP<T, WIDTH>::forward_impl(hipStream_t strea
 		fc_multiply(stream, output_weight_matrix(use_inference_params), forward->hidden.back(), *output, *output, m_output_activation);
 	}
 
+	// v40: Check forward activations for anomalies (only first occurrence)
+	{
+		static bool s_forward_anomaly_logged = false;
+		if (!s_forward_anomaly_logged) {
+			constexpr float THRESHOLD = 100.0f;  // Only check if values exceed this
+			
+			for (size_t layer_idx = 0; layer_idx < forward->hidden.size(); ++layer_idx) {
+				const auto& hidden = forward->hidden[layer_idx];
+				const size_t total = hidden.n_elements();
+				const size_t sample_size = std::min<size_t>(4096, total);
+				
+				std::vector<__half> host(sample_size);
+				hipError_t err = hipMemcpyAsync(host.data(), hidden.data(), sample_size * sizeof(__half), hipMemcpyDeviceToHost, stream);
+				if (err != hipSuccess) continue;
+				hipStreamSynchronize(stream);
+				
+				size_t nan_count = 0, inf_count = 0;
+				float max_abs = 0.0f;
+				for (size_t i = 0; i < sample_size; ++i) {
+					float v = __half2float(host[i]);
+					if (std::isnan(v)) { ++nan_count; }
+					else if (std::isinf(v)) { ++inf_count; }
+					float a = fabsf(v);
+					if (a > max_abs) max_abs = a;
+				}
+				
+				// Only print first occurrence of anomaly, then stop checking
+				if (nan_count > 0 || inf_count > 0 || max_abs > THRESHOLD) {
+					printf("[v40 FWD-HIDDEN] layer=%zu shape=[%u,%u] NaN=%zu Inf=%zu max=%.2f (first occurrence, further checks disabled)\n",
+						layer_idx, hidden.m(), hidden.n(), nan_count, inf_count, max_abs);
+					s_forward_anomaly_logged = true;
+					break;  // Stop checking remaining layers
+				}
+			}
+		}
+	}
+
 	return forward;
 }
 
