@@ -3,6 +3,13 @@ add_executable(fused_unfused_test
     ../src/fully_fused_mlp.cpp
 )
 
+# Add the necessary include directories that are normally inherited from the main library
+target_include_directories(fused_unfused_test PRIVATE
+    ../include
+    ../dependencies
+    ../dependencies/fmt/include
+)
+
 # By compiling fully_fused_mlp.cpp directly, we no longer need to link against
 # the full tiny-rocm-nn library for this specific test, which can cause
 # duplicate symbol errors. We link against its dependencies instead.
