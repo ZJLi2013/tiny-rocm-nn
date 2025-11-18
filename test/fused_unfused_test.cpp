@@ -11,6 +11,11 @@
 #include <tiny-cuda-nn/random.h>
 #include <tiny-cuda-nn/cublas_matmul.h>
 
+// For template functions, the full definition must be visible to the compiler.
+// Since the definition of `mlp_fused_forward` is in a .cpp file and we cannot
+// modify the library headers, we must include the .cpp file here for the test.
+#include "../src/fully_fused_mlp.cpp"
+
 #include <iostream>
 #include <stdexcept>
 #include <vector>
