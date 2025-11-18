@@ -48,7 +48,7 @@ constexpr uint32_t WAVE_SIZE = 64;
 // Debug control: Set to 1 to enable detailed diagnostics (may cause segfaults in some cases)
 // Set to 0 for production/testing
 #ifndef ENABLE_FUSED_MLP_DIAGNOSTICS
-#define ENABLE_FUSED_MLP_DIAGNOSTICS 0
+#define ENABLE_FUSED_MLP_DIAGNOSTICS 1
 #endif
 
 #if ENABLE_FUSED_MLP_DIAGNOSTICS

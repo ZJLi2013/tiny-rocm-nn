@@ -110,17 +110,22 @@ int main(int argc, char** argv) {
         // --- 1. Fused Path ---
         std::cout << "\n[1] Running fused forward pass..." << std::endl;
         
-        // Don't pass output to avoid potential issues, just get intermediate activations
+        // Use the public interface to get forward activations
         auto fused_ctx = network.forward(hipStreamDefault, input, nullptr, false, false);
         CUDA_CHECK_THROW(hipStreamSynchronize(hipStreamDefault));
         
         std::cout << "    Fused forward completed" << std::endl;
 
-        // Get the last hidden layer activation as output
-        const auto& fused_forward_ctx = dynamic_cast<const FullyFusedMLP<__half, WIDTH>::ForwardContext&>(*fused_ctx);
-        const auto& fused_last_hidden = fused_forward_ctx.hidden.back();
+        // Get the last hidden layer activation using public interface
+        // forward_activations returns (data_ptr, layout) for the specified layer
+        uint32_t last_layer_idx = network.num_forward_activations() - 1;
+        auto [fused_data, fused_layout] = network.forward_activations(*fused_ctx, last_layer_idx);
         
-        std::cout << "    Fused last hidden: [" << fused_last_hidden.m() << "x" << fused_last_hidden.n() << "]" << std::endl;
+        std::cout << "    Fused last hidden layer: idx=" << last_layer_idx 
+                  << ", layout=" << (fused_layout == CM ? "CM" : "RM") << std::endl;
+        
+        // Create a view of the fused output
+        GPUMatrix<__half, CM> fused_last_hidden(const_cast<__half*>(fused_data), WIDTH, BATCH_SIZE);
 
         // --- 2. Unfused Path ---
         std::cout << "\n[2] Running unfused forward pass..." << std::endl;
