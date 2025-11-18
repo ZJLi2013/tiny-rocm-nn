@@ -45,12 +45,20 @@ namespace tcnn {
 // ROCm: AMD GPU wave size (64 threads per wave, vs NVIDIA's 32 threads per warp)
 constexpr uint32_t WAVE_SIZE = 64;
 
+// Debug control: Set to 1 to enable detailed diagnostics (may cause segfaults in some cases)
+// Set to 0 for production/testing
+#ifndef ENABLE_FUSED_MLP_DIAGNOSTICS
+#define ENABLE_FUSED_MLP_DIAGNOSTICS 0
+#endif
+
+#if ENABLE_FUSED_MLP_DIAGNOSTICS
 // v32: Global diagnostic counters for anomaly detection
 __device__ uint32_t g_nan_detected = 0;
 __device__ uint32_t g_inf_detected = 0;
 __device__ uint32_t g_large_val_detected = 0;
 __device__ uint32_t g_first_nan_step = 0xFFFFFFFF;
 __device__ uint32_t g_current_step = 0;
+#endif
 
 void check_shmem_error(hipError_t error) {
 	if (error != hipSuccess) {
@@ -67,6 +75,7 @@ __device__ void sh2gmem(__half* device_mem, const __half* __restrict__ shmem, in
 	__syncthreads();
 }
 
+#if ENABLE_FUSED_MLP_DIAGNOSTICS
 // v32: Check shared memory for anomalies before computation
 template <int WIDTH, int N_ITERS>
 __device__ void check_shmem_input(const __half* __restrict__ act_shmem, const char* layer_name, uint32_t layer_idx) {
@@ -113,6 +122,7 @@ __device__ void check_shmem_input(const __half* __restrict__ act_shmem, const ch
 		}
 	}
 }
+#endif
 
 template <int WIDTH, int N_ITERS, typename OUT_T, bool BACKWARD=false>
 __device__ void threadblock_layer(Activation activation, __half* __restrict__ act_shmem, const __half* __restrict__ weights_this_layer, OUT_T* __restrict__ out_intermediate_threadblock_this_layer, const OUT_T* __restrict__ activation_aux = nullptr) {
@@ -153,6 +163,7 @@ __device__ void threadblock_layer(Activation activation, __half* __restrict__ ac
 
 	__syncthreads();
 
+#if ENABLE_FUSED_MLP_DIAGNOSTICS
 	// v33: Check weights for NaN (only first thread of first block, forward pass only)
 	if (blockIdx.x == 0 && threadIdx.x == 0 && threadIdx.y == 0 && !BACKWARD) {
 		bool has_nan = false;
@@ -171,6 +182,7 @@ __device__ void threadblock_layer(Activation activation, __half* __restrict__ ac
 			printf("[v33 WEIGHT] NaN in weights: cnt=%d\n", nan_count);
 		}
 	}
+#endif
 
 	// Load N_BLOCKS chunks of weights from global memory into registers.
 	TCNN_PRAGMA_UNROLL
@@ -202,16 +214,16 @@ __device__ void threadblock_layer(Activation activation, __half* __restrict__ ac
 			load_matrix_sync(act_frag, activation_aux + weights_col + l * 16 * WIDTH, WIDTH);
 			warp_activation_backward<OUT_T>(activation, result_frag[l], act_frag, result_frag[l]);
 		} else {
+#if ENABLE_FUSED_MLP_DIAGNOSTICS
 			// v42: pre-/post-activation sampling on forward path (first block & lane 0)
+			// WARNING: This diagnostic code may cause segfaults due to shared memory access patterns
 			// Pre: store pre-activation tile to shmem and sample a small subset
 			store_matrix_sync(act_shmem + weights_col + l * 16 * (WIDTH + SKEW), result_frag[l], WIDTH + SKEW, mem_row_major);
 			__syncthreads();
 			int pre_nan = 0, pre_inf = 0;
 			float pre_max = 0.0f;
 			if (blockIdx.x == 0 && threadIdx.x == 0 && threadIdx.y == 0) {
-				const uint32_t SAMPLE_SIZE = (16u * (WIDTH + SKEW)) < 256u ? (16u * (WIDTH + SKEW)) : 256u;
-				const __half* base_pre = act_shmem + weights_col + l * 16 * (WIDTH + SKEW);
-				// v42-fix: sample strictly within this wave's 16x16 tile to avoid reading uninitialized neighbors
+				const __half* base_pre = act_shmem + l * 16 * (WIDTH + SKEW);  // Fixed: use l*16 offset, not weights_col
 				for (uint32_t rr = 0; rr < 16u; ++rr) {
 					for (uint32_t cc = 0; cc < 16u; ++cc) {
 						float v = __half2float(base_pre[rr * (WIDTH + SKEW) + cc]);
@@ -233,9 +245,7 @@ __device__ void threadblock_layer(Activation activation, __half* __restrict__ ac
 			if (blockIdx.x == 0 && threadIdx.x == 0 && threadIdx.y == 0) {
 				int post_nan = 0, post_inf = 0;
 				float post_max = 0.0f;
-				const uint32_t SAMPLE_SIZE = (16u * (WIDTH + SKEW)) < 256u ? (16u * (WIDTH + SKEW)) : 256u;
-				const __half* base_post = act_shmem + weights_col + l * 16 * (WIDTH + SKEW);
-				// v42-fix: sample strictly within this wave's 16x16 tile to avoid reading uninitialized neighbors
+				const __half* base_post = act_shmem + l * 16 * (WIDTH + SKEW);  // Fixed: use l*16 offset, not weights_col
 				for (uint32_t rr = 0; rr < 16u; ++rr) {
 					for (uint32_t cc = 0; cc < 16u; ++cc) {
 						float v = __half2float(base_post[rr * (WIDTH + SKEW) + cc]);
@@ -253,6 +263,10 @@ __device__ void threadblock_layer(Activation activation, __half* __restrict__ ac
 						l, pre_nan, pre_inf, pre_max, post_nan, post_inf, post_max);
 				}
 			}
+#else
+			// Production path: just apply activation
+			warp_activation<OUT_T>(activation, result_frag[l], result_frag[l]);
+#endif
 		}
 	}
 
@@ -704,17 +718,21 @@ __global__ void kernel_mlp_fused(const Activation output_activation, const __hal
 		// instead of using the slower dynamic input layer routine.
 		threadblock_load_input_static<WIDTH, N_ITERS>(act_shmem, input + elem_idx * WIDTH);
 		
+#if ENABLE_FUSED_MLP_DIAGNOSTICS
 		// v33: Check raw input (before FirstLayer computation)
 		if (!INFERENCE) {
 			check_shmem_input<WIDTH, N_ITERS>(act_shmem, "RawInput", 0);
 		}
+#endif
 
 		threadblock_layer<WIDTH, N_ITERS, OUT_T>(ACTIVATION, act_shmem, weights, !INFERENCE ? (out_intermediate + elem_idx * WIDTH) : nullptr);
 		
+#if ENABLE_FUSED_MLP_DIAGNOSTICS
 		// v33: Check FirstLayer output (after FirstLayer computation)
 		if (!INFERENCE) {
 			check_shmem_input<WIDTH, N_ITERS>(act_shmem, "FirstLayer_Out", 0);
 		}
+#endif
 	}
 
 	const uint32_t first_weights_stride = WIDTH * in_width;
@@ -723,10 +741,12 @@ __global__ void kernel_mlp_fused(const Activation output_activation, const __hal
 
 	// Hidden layers
 	for (uint32_t k = 0; k < n_hidden_matmuls; ++k) {
+#if ENABLE_FUSED_MLP_DIAGNOSTICS
 		// v32: Check input before each hidden layer
 		if (!INFERENCE) {
 			check_shmem_input<WIDTH, N_ITERS>(act_shmem, "Hidden", k);
 		}
+#endif
 		threadblock_layer<WIDTH, N_ITERS, OUT_T>(ACTIVATION, act_shmem, weights + first_weights_stride + weights_stride * k, !INFERENCE ? (out_intermediate + layer_stride * (k + 1) + elem_idx * WIDTH) : nullptr);
 	}
 
@@ -737,10 +757,12 @@ __global__ void kernel_mlp_fused(const Activation output_activation, const __hal
 		}
 	} else if (out) {
 		// Last layer
+#if ENABLE_FUSED_MLP_DIAGNOSTICS
 		// v32: Check input before last layer
 		if (!INFERENCE) {
 			check_shmem_input<WIDTH, N_ITERS>(act_shmem, "LastLayer", n_hidden_matmuls);
 		}
+#endif
 		
 		if (output_layout == rocwmma::mem_row_major) {
 			threadblock_last_layer_forward<WIDTH, N_ITERS, OUT_T>(output_activation, act_shmem, weights + first_weights_stride + weights_stride * n_hidden_matmuls, out + elem_idx * output_stride, output_stride, output_layout);
@@ -776,6 +798,7 @@ std::enable_if_t<std::is_same<__half, T>::value> mlp_fused_forward(
 	const uint32_t batch_size = input.cols();
 	const uint32_t in_width = input.rows();
 
+#if ENABLE_FUSED_MLP_DIAGNOSTICS
 	// v35: Host-side sampling of forward input matrix (diagnostics)
 	{
 		static int s_fwd_calls = 0;
@@ -813,6 +836,7 @@ std::enable_if_t<std::is_same<__half, T>::value> mlp_fused_forward(
 			printf("[v35 FWD-IN] call=%d hipMemcpy failed: %d\n", s_fwd_calls, (int)err);
 		}
 	}
+#endif
 
 	constexpr uint32_t SKEW = WIDTH % 16 == 0 ? 8 : 0; // <- always going to be 8 as we only support multiple-of-16 widths
 	constexpr uint32_t INPUT_SKEW = 8; // <- likewise with inputs
@@ -951,6 +975,7 @@ std::unique_ptr<Context> FullyFusedMLP<T, WIDTH>::forward_impl(hipStream_t strea
 	uint32_t batch_size = input.n();
 	auto forward = allocate_forward_buffers(stream, batch_size);
 
+#if ENABLE_FUSED_MLP_DIAGNOSTICS
 	// v36: Host-side weight global sampling (diagnostics)
 	{
 		size_t total_params = 0;
@@ -993,6 +1018,7 @@ std::unique_ptr<Context> FullyFusedMLP<T, WIDTH>::forward_impl(hipStream_t strea
 			}
 		}
 	}
+#endif
 
 	// ASSUMPTION: weight matrices & forward_tmp matrices are contiguous in memory
 	switch (m_activation) {
@@ -1013,6 +1039,7 @@ std::unique_ptr<Context> FullyFusedMLP<T, WIDTH>::forward_impl(hipStream_t strea
 		fc_multiply(stream, output_weight_matrix(use_inference_params), forward->hidden.back(), *output, *output, m_output_activation);
 	}
 
+#if ENABLE_FUSED_MLP_DIAGNOSTICS
 	// v40: Check forward activations for anomalies (only first occurrence)
 	{
 		static bool s_forward_anomaly_logged = false;
@@ -1049,6 +1076,7 @@ std::unique_ptr<Context> FullyFusedMLP<T, WIDTH>::forward_impl(hipStream_t strea
 			}
 		}
 	}
+#endif
 
 	return forward;
 }
