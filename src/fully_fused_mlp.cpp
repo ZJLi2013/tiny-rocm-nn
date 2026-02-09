@@ -48,7 +48,7 @@ constexpr uint32_t WAVE_SIZE = 64;
 // Debug control: Set to 1 to enable detailed diagnostics (may cause segfaults in some cases)
 // Set to 0 for production/testing
 #ifndef ENABLE_FUSED_MLP_DIAGNOSTICS
-#define ENABLE_FUSED_MLP_DIAGNOSTICS 1
+#define ENABLE_FUSED_MLP_DIAGNOSTICS 0
 #endif
 
 #if ENABLE_FUSED_MLP_DIAGNOSTICS
@@ -838,42 +838,62 @@ std::enable_if_t<std::is_same<__half, T>::value> mlp_fused_forward(
 	}
 #endif
 
-	constexpr uint32_t SKEW = WIDTH % 16 == 0 ? 8 : 0; // <- always going to be 8 as we only support multiple-of-16 widths
-	constexpr uint32_t INPUT_SKEW = 8; // <- likewise with inputs
+	// SKEW：共享内存每行的额外填充，用于在 WIDTH 为 16 的倍数时避免 bank conflict。
+	// 对于支持的宽度（16 的倍数），该值为 8，用作共享内存访问的行步长增量。
+	constexpr uint32_t SKEW = WIDTH % 16 == 0 ? 8 : 0; // <- 始终为 8，因为仅支持 16 的倍数的宽度
+
+	// INPUT_SKEW：与 SKEW 类似，但用于第一层输入/权重的分块 staging（当 in_width != WIDTH 或输入布局需要 staging 时）。
+	// 保证 int4 向量化拷贝的对齐。
+	constexpr uint32_t INPUT_SKEW = 8; // <- 输入侧同为 8
+
+	// N_BLOCK_ROWS：一层宽度上的 16 列 tile 数。每个 tile 由一个 wave（threadIdx.y）处理。
 	constexpr uint32_t N_BLOCK_ROWS = WIDTH / 16;
 
+	// 编译期保证：kernel 仅支持 16 的倍数的宽度（WMMA tile 要求）。
 	static_assert(WIDTH % 16 == 0, "Width must be a multiply of 16.");
 
-	CHECK_THROW(in_width % 16 == 0);
-	CHECK_THROW(weights.rows() == WIDTH);
-	CHECK_THROW(weights.cols() % 16 == 0);
-	CHECK_THROW(output_intermediate.cols() == batch_size);
-	CHECK_THROW(!output || output->cols() == batch_size);
-	CHECK_THROW(input.layout() == RM || input.stride() == input.m());
+	// 运行期形状/布局检查（当前 batch 与参数张量的基本约束）。
+	CHECK_THROW(in_width % 16 == 0);                  // 输入宽度必须 16 对齐以满足 WMMA 切片
+	CHECK_THROW(weights.rows() == WIDTH);             // 权重矩阵行数必须等于网络 WIDTH（fan-out）
+	CHECK_THROW(weights.cols() % 16 == 0);            // 权重列数必须 16 对齐（fan-in）
+	CHECK_THROW(output_intermediate.cols() == batch_size);      // 中间前向缓冲的列数需等于 batch
+	CHECK_THROW(!output || output->cols() == batch_size);       // 若提供输出，其列数也必须等于 batch
+	CHECK_THROW(input.layout() == RM || input.stride() == input.m()); // 若为 CM，stride 必须与行数一致（连续）
 
+	// N_ITERS 决定每个 block 处理的“16 行切片”的数量。
+	// 对小/中 WIDTH 使用 8 次迭代提升占用率；对大 WIDTH（>=256）使用 2 次迭代以控制共享内存开销。
 	const int N_ITERS = WIDTH >= 256 ? 2 : 8;
 
+	// batch 以“每迭代 16 行”的 tile 处理；需整除以避免 fused kernel 的边界处理。
 	if (batch_size % (16 * N_ITERS) != 0) {
 		throw std::runtime_error{fmt::format("Batch size must be a multiple of {}.", 16 * N_ITERS)};
 	}
 
-	// ROCm: AMD GPUs use 64-thread waves (not 32-thread warps like NVIDIA)
-	// rocWMMA requires the entire wavefront to be active
-	// Reference: https://rocwmma.readthedocs.io/en/latest/conceptual/programmers-guide.html
-	const dim3 threads = { WAVE_SIZE, N_BLOCK_ROWS, 1 }; // Full wave per row, N_BLOCK_ROWS waves per block
+	// 启动配置：
+	// - x 维：64 线程的完整 wavefront（WAVE_SIZE），rocWMMA 要求
+	// - y 维：N_BLOCK_ROWS 个 wave，每个 wave 处理 WIDTH 上的一个 16 列 tile
+	// - z 维：1
+	// 参考：https://rocwmma.readthedocs.io/en/latest/conceptual/programmers-guide.html
+	const dim3 threads = { WAVE_SIZE, N_BLOCK_ROWS, 1 }; // 每行使用完整的 wave，块内按 N_BLOCK_ROWS 切分
 
+	// 每个 block 处理 16 * N_ITERS 行；网格大小覆盖整个 batch 的这些 tile。
 	uint32_t n_elems_per_block = 16 * N_ITERS;
 	uint32_t n_blocks = div_round_up(batch_size, n_elems_per_block);
 
-	size_t shmem_size = sizeof(__half) * (16 + 16 * N_ITERS) * (WIDTH + SKEW); // 16*WIDTH rows of weights (for the last layer; others are in registers only) + 16*WIDTH*N_ITERS rows of intermediate activations
+	// 动态共享内存大小：
+	// - (16 + 16*N_ITERS) 行，列维为 (WIDTH+SKEW)：
+	//   * 16*WIDTH 行用于最后一层权重在 shmem 中的缓存（其他层权重在寄存器中）
+	//   * 16*WIDTH*N_ITERS 行用于各迭代的中间激活（act_shmem）
+	size_t shmem_size = sizeof(__half) * (16 + 16 * N_ITERS) * (WIDTH + SKEW); // 16*WIDTH 行权重缓存 + 16*WIDTH*N_ITERS 行中间激活
 	if (in_width != WIDTH || input.layout() == RM) {
-		// If the input width is dynamic, the input weight matrix as well as part of the input will live in extra shared memory
+		// 对动态输入宽度或行主输入，额外保留 shmem 以使用 INPUT_SKEW 对输入/第一层权重进行 staging。
 		shmem_size = std::max(shmem_size, sizeof(__half) * (WIDTH + 16) * (in_width + INPUT_SKEW));
 	}
 
+	// 一维网格；y/z 维为 1，因为 WIDTH 的切片在块内（threads.y）完成。
 	const dim3 blocks = { n_blocks, 1u, 1u };
 
-	// add tmp gpu & host buffer for shmem print (Sep-23) 
+	// 共享内存诊断用的占位缓冲（当前未使用），可用于临时 dump 或主机传输调试。
 	__half* first_layer_post_gpu_buffer = nullptr ;
 	__half* first_layer_post_host_buffer = nullptr ; 
 
