@@ -42,3 +42,23 @@ set_target_properties(fused_unfused_layers_test PROPERTIES
     CXX_STANDARD_REQUIRED ON
     CXX_EXTENSIONS OFF
 )
+
+# =======================
+# fused_unfused_gemm_only_test
+# =======================
+add_executable(fused_unfused_gemm_only_test fused_unfused_gemm_only_test.cpp)
+
+target_include_directories(fused_unfused_gemm_only_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/dependencies
+)
+
+target_link_libraries(fused_unfused_gemm_only_test PRIVATE tiny-rocm-nn)
+
+target_compile_options(fused_unfused_gemm_only_test PRIVATE "--offload-arch=gfx942")
+
+set_target_properties(fused_unfused_gemm_only_test PROPERTIES
+    CXX_STANDARD 14
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
+)
