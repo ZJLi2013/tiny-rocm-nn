@@ -60,7 +60,7 @@ __device__ inline float one_blob_subwarp_aligned(F kernel, MatrixView<const floa
 	// which may not always be desired.
 	// If not desired, use the slower implementation without wraparound below.
 	#ifdef __HIP_PLATFORM_AMD__
-	float right_cdf = __shfl_sync(0xffffffffffffffffULL, left_cdf, bin_index + 1, n_bins);
+	float right_cdf = __shfl(left_cdf, bin_index + 1, n_bins);
 	#else
 	float right_cdf = __shfl_sync(0xffffffff, left_cdf, bin_index + 1, n_bins);
 	#endif
