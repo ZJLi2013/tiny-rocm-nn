@@ -110,11 +110,23 @@ model.network->inference(inference_inputs, inference_outputs);
 
 Key adaptations made during the port:
 
-1. **cuBLAS → hipBLAS**: All GEMM operations use `hipblasGemmEx` with FP32 compute for numerical stability
+1. **cuBLAS → hipBLAS**: All GEMM operations use `hipblasGemmEx` with FP32 compute type. Note: FP16 compute (`HIPBLAS_R_16F`) was tested and produces correct results (identical loss convergence), but is **2.2x slower** on MI300X — AMD MFMA natively accumulates in FP32, and FP16 compute forces a non-MFMA fallback path. `HIPBLAS_R_32F` is the optimal setting.
 2. **CUDA WMMA → rocWMMA**: Tensor core operations ported to AMD's MFMA instructions via `rocwmma::mma_sync`
 3. **Wave64 addressing**: AMD GPUs use 64-thread wavefronts (vs CUDA's 32-thread warps). All `int4` vectorized copy loops adjusted for `WAVE_SIZE=64`
 4. **Fragment layout fix**: rocWMMA `accumulator` and `matrix_a` fragments have different register-to-element mappings. Element-wise activation backward moved to shared memory to avoid silent data corruption
 5. **Warp intrinsics**: `__shfl_sync` → `__shfl`, `__shfl_xor_sync` → `__shfl_xor` (ROCm implicit synchronization)
+
+## Future Optimization Directions
+
+The current port is functionally correct and ~1.25x faster than PyTorch FP32. Further performance gains could come from:
+
+1. **CUTLASS → composable_kernel**: The original tiny-cuda-nn uses CUTLASS to fuse GEMM + activation into a single kernel (epilogue fusion). The current hipBLAS path requires separate kernel launches for GEMM and activation, adding launch overhead and extra memory round-trips. AMD's [composable_kernel](https://github.com/ROCm/composable_kernel) library provides equivalent epilogue fusion capabilities for MFMA.
+
+2. **Fused MLP kernel optimization**: The rocWMMA-based fused MLP kernel currently uses a shared-memory workaround for the fragment layout mismatch in backward pass. Profiling and tuning shared memory access patterns, occupancy, and wave scheduling could improve throughput.
+
+3. **hipBLASLt exploration**: [hipBLASLt](https://github.com/ROCm/hipBLASLt) offers more control over GEMM algorithms and may provide better performance than hipBLAS for the small-matrix GEMMs common in MLP training.
+
+4. **Stream and kernel overlap**: Investigate opportunities for overlapping GEMM, activation, and optimizer kernels across multiple streams to improve GPU utilization.
 
 ## Components
 
