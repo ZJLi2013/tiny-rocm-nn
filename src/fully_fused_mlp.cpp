@@ -282,9 +282,11 @@ __device__ void threadblock_layer(Activation activation, __half* __restrict__ ac
 	if (out_intermediate_threadblock_this_layer != nullptr) {
 		__syncthreads();
 
+		constexpr uint32_t ROWS_PER_COPY_STEP = WAVE_SIZE / 2;
+		constexpr uint32_t COPY_N_ITERS = (16 * N_ITERS) / ROWS_PER_COPY_STEP;
 		TCNN_PRAGMA_UNROLL
-		for (int l = 0; l < N_ITERS; ++l) {
-			*(int4*)&out_intermediate_threadblock_this_layer[lane_offset + (row + 16 * l) * WIDTH] = *(int4*)&act_shmem[lane_offset + (row + 16 * l) * (WIDTH + SKEW)];
+		for (int l = 0; l < COPY_N_ITERS; ++l) {
+			*(int4*)&out_intermediate_threadblock_this_layer[lane_offset + (row + ROWS_PER_COPY_STEP * l) * WIDTH] = *(int4*)&act_shmem[lane_offset + (row + ROWS_PER_COPY_STEP * l) * (WIDTH + SKEW)];
 		}
 	}
 }
@@ -300,11 +302,13 @@ __device__ void threadblock_load_input_static(__half* __restrict__ act_shmem, co
 	const uint32_t wi = threadIdx.y; // index in block ("wave index")
 
 	const uint32_t lane_offset = (8 * li) % WIDTH;
-	const uint32_t row = (8 * li + wi * 8 * WAVE_SIZE) / WIDTH;  // Updated for 64-thread waves
+	const uint32_t row = (8 * li + wi * 8 * WAVE_SIZE) / WIDTH;
 
+	constexpr uint32_t ROWS_PER_COPY_STEP = WAVE_SIZE / 2;
+	constexpr uint32_t COPY_N_ITERS = (16 * N_ITERS) / ROWS_PER_COPY_STEP;
 	TCNN_PRAGMA_UNROLL
-	for (int i = 0; i < N_ITERS; ++i) {
-		*(int4*)&act_shmem[lane_offset + (row + 16 * i) * (WIDTH + SKEW)] = *(int4*)&input_threadblock[lane_offset + (row + 16 * i) * WIDTH];
+	for (int i = 0; i < COPY_N_ITERS; ++i) {
+		*(int4*)&act_shmem[lane_offset + (row + ROWS_PER_COPY_STEP * i) * (WIDTH + SKEW)] = *(int4*)&input_threadblock[lane_offset + (row + ROWS_PER_COPY_STEP * i) * WIDTH];
 	}
 	__syncthreads(); 
 }
@@ -399,9 +403,11 @@ __global__ void kernel_mlp_fused_backward(
 
 		__syncthreads();
 
+		constexpr uint32_t ROWS_PER_COPY_STEP_BW = WAVE_SIZE / 2;
+		constexpr uint32_t COPY_N_ITERS_BW = (16 * N_ITERS) / ROWS_PER_COPY_STEP_BW;
 		TCNN_PRAGMA_UNROLL
-		for (int i = 0; i < N_ITERS; ++i) {
-			*(int4*)&out_intermediate[lane_offset + (row + elem_idx + i * 16) * WIDTH] = *(int4*)&act_shmem[lane_offset + (row + 16 * i) * (WIDTH + SKEW)];
+		for (int i = 0; i < COPY_N_ITERS_BW; ++i) {
+			*(int4*)&out_intermediate[lane_offset + (row + elem_idx + i * ROWS_PER_COPY_STEP_BW) * WIDTH] = *(int4*)&act_shmem[lane_offset + (row + ROWS_PER_COPY_STEP_BW * i) * (WIDTH + SKEW)];
 		}
 	} else {
 		// If the output width is larger than 16, we will have used CUTLASS for backpropping through the last layer.
@@ -590,9 +596,11 @@ __device__ void threadblock_input_layer_forward_dynamic(Activation activation, _
 	if (out_intermediate_threadblock_this_layer != nullptr) {
 		__syncthreads();
 
+		constexpr uint32_t ROWS_PER_COPY_STEP = WAVE_SIZE / 2;
+		constexpr uint32_t COPY_N_ITERS = (16 * N_ITERS) / ROWS_PER_COPY_STEP;
 		TCNN_PRAGMA_UNROLL
-		for (int i = 0; i < N_ITERS; ++i) {
-			*(int4*)&out_intermediate_threadblock_this_layer[lane_offset + (row + 16 * i) * WIDTH] = *(int4*)&act_shmem[lane_offset + (row + 16 * i) * (WIDTH + SKEW)];
+		for (int i = 0; i < COPY_N_ITERS; ++i) {
+			*(int4*)&out_intermediate_threadblock_this_layer[lane_offset + (row + ROWS_PER_COPY_STEP * i) * WIDTH] = *(int4*)&act_shmem[lane_offset + (row + ROWS_PER_COPY_STEP * i) * (WIDTH + SKEW)];
 		}
 	}
 }
@@ -624,12 +632,15 @@ __device__ void threadblock_last_layer_forward(Activation activation, __half* __
 	__half* __restrict__ weights_shmem = act_shmem + N_ITERS * 16 * (WIDTH + SKEW);
 
 	const uint32_t weights_row = (8 * li) % WIDTH;
-	const uint32_t weights_col = (8 * li + 8 * WAVE_SIZE * wi) / WIDTH;  // Updated for 64-thread waves
+	const uint32_t weights_col = (8 * li + 8 * WAVE_SIZE * wi) / WIDTH;
 
 	// Load weight matrix into shared memory for the last multiplication.
 	// Loading into shared memory as opposed to directly into registers is faster
 	// because unlike in the previous layers, each warp uses the same entries of the weight matrix.
-	*(int4*)&weights_shmem[weights_row + weights_col * (WIDTH + SKEW)] = *(int4*)&weights_this_layer[weights_row + weights_col * WIDTH];
+	// Guard: wave64 produces weights_col up to 31; last-layer weights are only 16 columns wide.
+	if (weights_col < 16) {
+		*(int4*)&weights_shmem[weights_row + weights_col * (WIDTH + SKEW)] = *(int4*)&weights_this_layer[weights_row + weights_col * WIDTH];
+	}
 
 	__syncthreads();
 
@@ -676,9 +687,11 @@ __device__ void threadblock_write_output_static(const __half* __restrict__ act_s
 
 	__syncthreads();
 
+	constexpr uint32_t ROWS_PER_COPY_STEP = WAVE_SIZE / 2;
+	constexpr uint32_t COPY_N_ITERS = (16 * N_ITERS) / ROWS_PER_COPY_STEP;
 	TCNN_PRAGMA_UNROLL
-	for (int i = 0; i < N_ITERS; ++i) {
-		*(int4*)&output_threadblock[lane_offset + (row + 16 * i) * WIDTH] = *(int4*)&act_shmem[lane_offset + (row + 16 * i) * (WIDTH + SKEW)];
+	for (int i = 0; i < COPY_N_ITERS; ++i) {
+		*(int4*)&output_threadblock[lane_offset + (row + ROWS_PER_COPY_STEP * i) * WIDTH] = *(int4*)&act_shmem[lane_offset + (row + ROWS_PER_COPY_STEP * i) * (WIDTH + SKEW)];
 	}
 }
 
