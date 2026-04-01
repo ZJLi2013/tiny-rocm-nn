@@ -49,33 +49,6 @@
 using namespace tcnn;
 using precision_t = network_precision_t;
 
-// Simple host-side GPU buffer inspector for debugging NaN/Inf and max-abs
-static void debug_array_gpu_float(const char* label, const float* dptr, size_t n) {
-	std::vector<float> host(n);
-	hipError_t err = hipMemcpy(host.data(), dptr, sizeof(float)*n, hipMemcpyDeviceToHost);
-	if (err != hipSuccess) {
-		std::cout << "[DBG] " << label << ": hipMemcpy failed: " << static_cast<int>(err) << std::endl;
-		return;
-	}
-	size_t nan_count = 0, inf_count = 0;
-	float max_abs = 0.0f;
-	for (size_t i = 0; i < n; ++i) {
-		float v = host[i];
-		if (std::isnan(v)) ++nan_count;
-		else if (std::isinf(v)) ++inf_count;
-		float a = std::fabs(v);
-		if (a > max_abs) max_abs = a;
-	}
-	std::cout << "[DBG] " << label << ": n=" << n << " NaN=" << nan_count << " Inf=" << inf_count << " max_abs=" << max_abs << std::endl;
-}
-
-static void debug_matrix_gpu_float(const char* label, const GPUMatrix<float>& m) {
-	debug_array_gpu_float(label, m.data(), (size_t)m.n_elements());
-}
-
-static void debug_memory_gpu_float(const char* label, const GPUMemory<float>& mem) {
-	debug_array_gpu_float(label, mem.data(), (size_t)mem.size());
-}
 
 GPUMemory<float> load_image(const std::string& filename, int& width, int& height) {
 	// width * height * RGBA
@@ -244,9 +217,7 @@ int main(int argc, char* argv[]) {
 
 		// First step: load an image that we'd like to learn
 		int width, height;
-	GPUMemory<float> image = load_image(argv[1], width, height);   // 256, 256 
-	// Debug: check raw image buffer for NaN/Inf and range
-	debug_memory_gpu_float("image_raw_rgba", image);
+	GPUMemory<float> image = load_image(argv[1], width, height);
 
 #ifndef __HIP_PLATFORM_AMD__
 		// Second step: create a cuda texture out of this image (NVIDIA only)
@@ -298,17 +269,12 @@ int main(int argc, char* argv[]) {
 		}
 
 	xs_and_ys.copy_from_host(host_xs_and_ys.data());
-	// Debug: coordinates buffer
-	debug_memory_gpu_float("coords_xs_ys", xs_and_ys);
 
 #ifdef __HIP_PLATFORM_AMD__
 		linear_kernel(eval_image<3>, 0, nullptr, n_coords, image.data(), width, height, xs_and_ys.data(), sampled_image.data());
 #else
 		linear_kernel(eval_image<3>, 0, nullptr, n_coords, texture, xs_and_ys.data(), sampled_image.data());
 #endif
-		// Debug: sampled reference image (RGB)
-		debug_memory_gpu_float("sampled_image_ref_rgb", sampled_image);
-
 		save_image(sampled_image.data(), sampling_width, sampling_height, 3, 3, "reference.jpg");
 
 		// Fourth step: train the model by sampling the above image and optimizing an error metric
@@ -328,13 +294,6 @@ int main(int argc, char* argv[]) {
 		// Auxiliary matrices for training
 		GPUMatrix<float> training_target(n_output_dims, batch_size);
 		GPUMatrix<float> training_batch(n_input_dims, batch_size);
-
-		// 中文注释:
-		// 这里的矩阵维度被定义为 [dimension, num_elements]，而不是更常见的 [num_elements, dimension]，主要有以下两个原因：
-		// 1. 惯例与线性代数：在许多高性能计算库（如cuBLAS）中，习惯将数据矩阵的每一列视为一个独立的向量（例如一个训练样本）。
-		// 2. GPU 内存访问性能：这种列优先（Column-Major）的数据布局可以实现所谓的“合并内存访问”（Coalesced Memory Access）。
-		//    GPU 线程在并行处理数据时，可以一次性读取连续的内存块，这比读取分散在各处的数据要快得多。
-		//    tiny-cuda-nn 中的高度优化的CUDA核心（如 Fully-Fused MLP）就是为这种数据布局设计的，以最大限度地提高吞吐量。
 
 		// Auxiliary matrices for evaluation
 		GPUMatrix<float> prediction(n_output_dims, n_coords_padded);
@@ -373,11 +332,6 @@ int main(int argc, char* argv[]) {
 #else
 				linear_kernel(eval_image<n_output_dims>, 0, training_stream, batch_size, texture, training_batch.data(), training_target.data());
 #endif
-				// Debug: at initial step and at configured intervals, check training inputs/targets
-				if (i == 0 || i == 1 || i == 2) {
-					debug_matrix_gpu_float("train_batch_xy", training_batch);
-					debug_matrix_gpu_float("train_target_rgb", training_target);
-				}
 			}
 
 			// Training step

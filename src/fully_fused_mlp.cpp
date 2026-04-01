@@ -45,20 +45,6 @@ namespace tcnn {
 // ROCm: AMD GPU wave size (64 threads per wave, vs NVIDIA's 32 threads per warp)
 constexpr uint32_t WAVE_SIZE = 64;
 
-// Debug control: Set to 1 to enable detailed diagnostics (may cause segfaults in some cases)
-// Set to 0 for production/testing
-#ifndef ENABLE_FUSED_MLP_DIAGNOSTICS
-#define ENABLE_FUSED_MLP_DIAGNOSTICS 0
-#endif
-
-#if ENABLE_FUSED_MLP_DIAGNOSTICS
-// v32: Global diagnostic counters for anomaly detection
-__device__ uint32_t g_nan_detected = 0;
-__device__ uint32_t g_inf_detected = 0;
-__device__ uint32_t g_large_val_detected = 0;
-__device__ uint32_t g_first_nan_step = 0xFFFFFFFF;
-__device__ uint32_t g_current_step = 0;
-#endif
 
 void check_shmem_error(hipError_t error) {
 	if (error != hipSuccess) {
@@ -66,63 +52,7 @@ void check_shmem_error(hipError_t error) {
 	}
 }
 
-__device__ void sh2gmem(__half* device_mem, const __half* __restrict__ shmem, int N)
-{
-	int tid = threadIdx.x + threadIdx.y * blockDim.x;
-	if(tid < N){
-		device_mem[tid] = shmem[tid];
-	}
-	__syncthreads();
-}
 
-#if ENABLE_FUSED_MLP_DIAGNOSTICS
-// v32: Check shared memory for anomalies before computation
-template <int WIDTH, int N_ITERS>
-__device__ void check_shmem_input(const __half* __restrict__ act_shmem, const char* layer_name, uint32_t layer_idx) {
-	// Only first thread of first block checks
-	if (blockIdx.x == 0 && threadIdx.x == 0 && threadIdx.y == 0) {
-		constexpr uint32_t SKEW = WIDTH % 16 == 0 ? 8 : 0;
-		constexpr float THRESHOLD = 100.0f;
-		
-		bool has_nan = false;
-		bool has_inf = false;
-		float max_val = 0.0f;
-		int nan_count = 0;
-		
-		// Sample first 256 elements for efficiency
-		const uint32_t max_size = 16u * N_ITERS * (WIDTH + SKEW);
-		const int SAMPLE_SIZE = (max_size < 256u) ? max_size : 256u;
-		
-		for (int i = 0; i < SAMPLE_SIZE; i++) {
-			float val = __half2float(act_shmem[i]);
-			if (isnan(val)) {
-				has_nan = true;
-				nan_count++;
-			}
-			if (isinf(val)) has_inf = true;
-			max_val = fmaxf(max_val, fabsf(val));
-		}
-		
-		// Only print if NaN or Inf detected (critical issues)
-		if (has_nan || has_inf) {
-			printf("[v32 ALERT] %s[%u]: NaN=%d(cnt=%d), Inf=%d, max=%.2f\n",
-			       layer_name, layer_idx, has_nan, nan_count, has_inf, max_val);
-			
-			// Update global counters
-			if (has_nan) {
-				atomicAdd(&g_nan_detected, 1);
-				atomicMin(&g_first_nan_step, g_current_step);
-			}
-			if (has_inf) atomicAdd(&g_inf_detected, 1);
-		} else if (max_val > THRESHOLD) {
-			// Only print large values if no NaN/Inf (less critical)
-			// Uncomment below if you want to track large values
-			// printf("[v32 INFO] %s[%u]: max=%.2f\n", layer_name, layer_idx, max_val);
-			atomicAdd(&g_large_val_detected, 1);
-		}
-	}
-}
-#endif
 
 template <int WIDTH, int N_ITERS, typename OUT_T, bool BACKWARD=false>
 __device__ void threadblock_layer(Activation activation, __half* __restrict__ act_shmem, const __half* __restrict__ weights_this_layer, OUT_T* __restrict__ out_intermediate_threadblock_this_layer, const OUT_T* __restrict__ activation_aux = nullptr) {
@@ -163,26 +93,6 @@ __device__ void threadblock_layer(Activation activation, __half* __restrict__ ac
 
 	__syncthreads();
 
-#if ENABLE_FUSED_MLP_DIAGNOSTICS
-	// v33: Check weights for NaN (only first thread of first block, forward pass only)
-	if (blockIdx.x == 0 && threadIdx.x == 0 && threadIdx.y == 0 && !BACKWARD) {
-		bool has_nan = false;
-		int nan_count = 0;
-		const uint32_t max_check = (WIDTH * WIDTH < 256u) ? WIDTH * WIDTH : 256u;
-		
-		for (uint32_t i = 0; i < max_check; i++) {
-			float val = __half2float(weights_this_layer[i]);
-			if (isnan(val)) {
-				has_nan = true;
-				nan_count++;
-			}
-		}
-		
-		if (has_nan) {
-			printf("[v33 WEIGHT] NaN in weights: cnt=%d\n", nan_count);
-		}
-	}
-#endif
 
 	// Load N_BLOCKS chunks of weights from global memory into registers.
 	TCNN_PRAGMA_UNROLL
@@ -215,59 +125,8 @@ __device__ void threadblock_layer(Activation activation, __half* __restrict__ ac
 			// element-wise activation backward across fragment types.
 			// Instead, defer to shared-memory approach after store_matrix_sync.
 		} else {
-#if ENABLE_FUSED_MLP_DIAGNOSTICS
-			// v42: pre-/post-activation sampling on forward path (first block & lane 0)
-			// WARNING: This diagnostic code may cause segfaults due to shared memory access patterns
-			// Pre: store pre-activation tile to shmem and sample a small subset
-			store_matrix_sync(act_shmem + weights_col + l * 16 * (WIDTH + SKEW), result_frag[l], WIDTH + SKEW, mem_row_major);
-			__syncthreads();
-			int pre_nan = 0, pre_inf = 0;
-			float pre_max = 0.0f;
-			if (blockIdx.x == 0 && threadIdx.x == 0 && threadIdx.y == 0) {
-				const __half* base_pre = act_shmem + l * 16 * (WIDTH + SKEW);  // Fixed: use l*16 offset, not weights_col
-				for (uint32_t rr = 0; rr < 16u; ++rr) {
-					for (uint32_t cc = 0; cc < 16u; ++cc) {
-						float v = __half2float(base_pre[rr * (WIDTH + SKEW) + cc]);
-						if (isnan(v)) ++pre_nan;
-						else if (isinf(v)) ++pre_inf;
-						float a = fabsf(v);
-						if (a > pre_max) pre_max = a;
-					}
-				}
-			}
-			__syncthreads();
-
-			// Activation
-			warp_activation<OUT_T>(activation, result_frag[l], result_frag[l]);
-
-			// Post: store post-activation tile, sample, and only print when diff/anomaly changes
-			store_matrix_sync(act_shmem + weights_col + l * 16 * (WIDTH + SKEW), result_frag[l], WIDTH + SKEW, mem_row_major);
-			__syncthreads();
-			if (blockIdx.x == 0 && threadIdx.x == 0 && threadIdx.y == 0) {
-				int post_nan = 0, post_inf = 0;
-				float post_max = 0.0f;
-				const __half* base_post = act_shmem + l * 16 * (WIDTH + SKEW);  // Fixed: use l*16 offset, not weights_col
-				for (uint32_t rr = 0; rr < 16u; ++rr) {
-					for (uint32_t cc = 0; cc < 16u; ++cc) {
-						float v = __half2float(base_post[rr * (WIDTH + SKEW) + cc]);
-						if (isnan(v)) ++post_nan;
-						else if (isinf(v)) ++post_inf;
-						float a = fabsf(v);
-						if (a > post_max) post_max = a;
-					}
-				}
-				const bool pre_anom = (pre_nan > 0) || (pre_inf > 0);
-				const bool post_anom = (post_nan > 0) || (post_inf > 0);
-				const float diff = fabsf(post_max - pre_max);
-				if (pre_anom != post_anom || diff > 1e-3f) {
-					printf("[v42 ACT] it=%d pre(NaN=%d,Inf=%d,max=%.4f) post(NaN=%d,Inf=%d,max=%.4f)\n",
-						l, pre_nan, pre_inf, pre_max, post_nan, post_inf, post_max);
-				}
-			}
-#else
 			// Production path: just apply activation
 			warp_activation<OUT_T>(activation, result_frag[l], result_frag[l]);
-#endif
 		}
 	}
 
@@ -782,8 +641,7 @@ __device__ void threadblock_write_output_static(const __half* __restrict__ act_s
 }
 
 template <int WIDTH, int N_ITERS, typename OUT_T, Activation ACTIVATION, bool INFERENCE>
-__global__ void kernel_mlp_fused(const Activation output_activation, const __half* __restrict__ input, const __half* __restrict__ weights, OUT_T* __restrict__ out_intermediate, OUT_T* __restrict__ out, const uint32_t output_stride, const uint32_t batch_size, const uint32_t in_width, const uint32_t out_width, const uint32_t n_hidden_matmuls, const rocwmma::layout_t input_layout, const rocwmma::layout_t output_layout,
-	 __half* first_layer_post_gpu_buffer) {
+__global__ void kernel_mlp_fused(const Activation output_activation, const __half* __restrict__ input, const __half* __restrict__ weights, OUT_T* __restrict__ out_intermediate, OUT_T* __restrict__ out, const uint32_t output_stride, const uint32_t batch_size, const uint32_t in_width, const uint32_t out_width, const uint32_t n_hidden_matmuls, const rocwmma::layout_t input_layout, const rocwmma::layout_t output_layout) {
 
 	// `input` points to the input matrix. Can be any width.
 	// `weights` points to the weight matrices (contiguous in memory).
@@ -817,21 +675,9 @@ __global__ void kernel_mlp_fused(const Activation output_activation, const __hal
 		// instead of using the slower dynamic input layer routine.
 		threadblock_load_input_static<WIDTH, N_ITERS>(act_shmem, input + elem_idx * WIDTH);
 		
-#if ENABLE_FUSED_MLP_DIAGNOSTICS
-		// v33: Check raw input (before FirstLayer computation)
-		if (!INFERENCE) {
-			check_shmem_input<WIDTH, N_ITERS>(act_shmem, "RawInput", 0);
-		}
-#endif
 
 		threadblock_layer<WIDTH, N_ITERS, OUT_T>(ACTIVATION, act_shmem, weights, !INFERENCE ? (out_intermediate + elem_idx * WIDTH) : nullptr);
 		
-#if ENABLE_FUSED_MLP_DIAGNOSTICS
-		// v33: Check FirstLayer output (after FirstLayer computation)
-		if (!INFERENCE) {
-			check_shmem_input<WIDTH, N_ITERS>(act_shmem, "FirstLayer_Out", 0);
-		}
-#endif
 	}
 
 	const uint32_t first_weights_stride = WIDTH * in_width;
@@ -840,12 +686,6 @@ __global__ void kernel_mlp_fused(const Activation output_activation, const __hal
 
 	// Hidden layers
 	for (uint32_t k = 0; k < n_hidden_matmuls; ++k) {
-#if ENABLE_FUSED_MLP_DIAGNOSTICS
-		// v32: Check input before each hidden layer
-		if (!INFERENCE) {
-			check_shmem_input<WIDTH, N_ITERS>(act_shmem, "Hidden", k);
-		}
-#endif
 		threadblock_layer<WIDTH, N_ITERS, OUT_T>(ACTIVATION, act_shmem, weights + first_weights_stride + weights_stride * k, !INFERENCE ? (out_intermediate + layer_stride * (k + 1) + elem_idx * WIDTH) : nullptr);
 	}
 
@@ -856,12 +696,6 @@ __global__ void kernel_mlp_fused(const Activation output_activation, const __hal
 		}
 	} else if (out) {
 		// Last layer
-#if ENABLE_FUSED_MLP_DIAGNOSTICS
-		// v32: Check input before last layer
-		if (!INFERENCE) {
-			check_shmem_input<WIDTH, N_ITERS>(act_shmem, "LastLayer", n_hidden_matmuls);
-		}
-#endif
 		
 		if (output_layout == rocwmma::mem_row_major) {
 			threadblock_last_layer_forward<WIDTH, N_ITERS, OUT_T>(output_activation, act_shmem, weights + first_weights_stride + weights_stride * n_hidden_matmuls, out + elem_idx * output_stride, output_stride, output_layout);
@@ -897,45 +731,6 @@ std::enable_if_t<std::is_same<__half, T>::value> mlp_fused_forward(
 	const uint32_t batch_size = input.cols();
 	const uint32_t in_width = input.rows();
 
-#if ENABLE_FUSED_MLP_DIAGNOSTICS
-	// v35: Host-side sampling of forward input matrix (diagnostics)
-	{
-		static int s_fwd_calls = 0;
-		++s_fwd_calls;
-
-		const size_t rows = in_width;
-		const size_t cols = batch_size;
-		const size_t total = rows * cols;
-		const size_t sample = total < 4096 ? total : (size_t)4096;
-
-		std::vector<__half> host(sample);
-		hipError_t err = hipMemcpy(host.data(), input.data(), sample * sizeof(__half), hipMemcpyDeviceToHost);
-
-		size_t nan_count = 0, inf_count = 0;
-		float max_abs = 0.0f;
-
-		if (err == hipSuccess) {
-			for (size_t i = 0; i < sample; ++i) {
-				float v = __half2float(host[i]);
-				if (std::isnan(v)) { ++nan_count; }
-				else if (std::isinf(v)) { ++inf_count; }
-				float a = fabsf(v);
-				if (a > max_abs) max_abs = a;
-			}
-
-			const char* layout_name = input.layout() == RM ? "RM" : "CM";
-			const char* mapped_layout = input.layout() == RM ? "mem_col_major" : "mem_row_major";
-
-			// Print first few calls and then every 500 calls to limit verbosity
-			if (s_fwd_calls <= 5 || (s_fwd_calls % 500) == 0) {
-				printf("[v35 FWD-IN] call=%d layout=%s rows=%zu cols=%zu stride=%u mapped=%s NaN=%zu Inf=%zu max=%.2f\n",
-					s_fwd_calls, layout_name, rows, cols, input.stride(), mapped_layout, nan_count, inf_count, max_abs);
-			}
-		} else {
-			printf("[v35 FWD-IN] call=%d hipMemcpy failed: %d\n", s_fwd_calls, (int)err);
-		}
-	}
-#endif
 
 	// SKEW：共享内存每行的额外填充，用于在 WIDTH 为 16 的倍数时避免 bank conflict。
 	// 对于支持的宽度（16 的倍数），该值为 8，用作共享内存访问的行步长增量。
@@ -992,10 +787,6 @@ std::enable_if_t<std::is_same<__half, T>::value> mlp_fused_forward(
 	// 一维网格；y/z 维为 1，因为 WIDTH 的切片在块内（threads.y）完成。
 	const dim3 blocks = { n_blocks, 1u, 1u };
 
-	// 共享内存诊断用的占位缓冲（当前未使用），可用于临时 dump 或主机传输调试。
-	__half* first_layer_post_gpu_buffer = nullptr ;
-	__half* first_layer_post_host_buffer = nullptr ; 
-
 
 	check_shmem_error(hipFuncSetAttribute(reinterpret_cast<const void*>(kernel_mlp_fused<WIDTH, N_ITERS, __half, ACTIVATION, INFERENCE>), hipFuncAttributeMaxDynamicSharedMemorySize, (int)shmem_size));
 	kernel_mlp_fused<WIDTH, N_ITERS, __half, ACTIVATION, INFERENCE><<<blocks, threads, shmem_size, stream>>>(
@@ -1011,8 +802,7 @@ std::enable_if_t<std::is_same<__half, T>::value> mlp_fused_forward(
 		n_hidden_layers,
 		// The kernels operate with transposed layouts compared with the MLP code
 		input.layout() == RM ? rocwmma::mem_col_major : rocwmma::mem_row_major,
-		output && output->layout() == RM ? rocwmma::mem_col_major : rocwmma::mem_row_major,
-		first_layer_post_gpu_buffer
+		output && output->layout() == RM ? rocwmma::mem_col_major : rocwmma::mem_row_major
 	);
 }
 
@@ -1094,50 +884,6 @@ std::unique_ptr<Context> FullyFusedMLP<T, WIDTH>::forward_impl(hipStream_t strea
 	uint32_t batch_size = input.n();
 	auto forward = allocate_forward_buffers(stream, batch_size);
 
-#if ENABLE_FUSED_MLP_DIAGNOSTICS
-	// v36: Host-side weight global sampling (diagnostics)
-	{
-		size_t total_params = 0;
-		for (const auto& m : m_weight_matrices) total_params += m.n_elements();
-
-		const char* set_name = use_inference_params ? "inference" : "train";
-		bool printed_header = false;
-
-		for (size_t i = 0; i < m_weight_matrices.size(); ++i) {
-			const auto& W = use_inference_params ? m_weight_matrices_inference[i] : m_weight_matrices[i];
-			const size_t n = W.n_elements();
-			const size_t sample_n = n < 4096 ? n : (size_t)4096;
-
-			std::vector<__half> host(sample_n);
-			hipError_t err = hipMemcpyAsync(host.data(), W.data(), sample_n * sizeof(__half), hipMemcpyDeviceToHost, stream);
-			if (err != hipSuccess) {
-				printf("[v36 WEIGHTS] idx=%zu m=%u n=%u memcpy_failed=%d\n", i, W.m(), W.n(), (int)err);
-				continue;
-			}
-			hipStreamSynchronize(stream);
-
-			size_t nan_count = 0, inf_count = 0;
-			float max_abs = 0.0f;
-			for (size_t k = 0; k < sample_n; ++k) {
-				float v = __half2float(host[k]);
-				if (std::isnan(v)) { ++nan_count; }
-				else if (std::isinf(v)) { ++inf_count; }
-				float a = fabsf(v);
-				if (a > max_abs) max_abs = a;
-			}
-
-			// Only print when anomalies are detected
-			if (nan_count > 0 || inf_count > 0) {
-				if (!printed_header) {
-					printf("[v36 WEIGHTS] set=%s total_params=%zu\n", set_name, total_params);
-					printed_header = true;
-				}
-				printf("[v36 WEIGHTS] idx=%zu shape=[%u,%u] stride=%u NaN=%zu Inf=%zu max=%.4f\n",
-					i, W.m(), W.n(), W.stride(), nan_count, inf_count, max_abs);
-			}
-		}
-	}
-#endif
 
 	// ASSUMPTION: weight matrices & forward_tmp matrices are contiguous in memory
 	switch (m_activation) {
@@ -1158,44 +904,6 @@ std::unique_ptr<Context> FullyFusedMLP<T, WIDTH>::forward_impl(hipStream_t strea
 		fc_multiply(stream, output_weight_matrix(use_inference_params), forward->hidden.back(), *output, *output, m_output_activation);
 	}
 
-#if ENABLE_FUSED_MLP_DIAGNOSTICS
-	// v40: Check forward activations for anomalies (only first occurrence)
-	{
-		static bool s_forward_anomaly_logged = false;
-		if (!s_forward_anomaly_logged) {
-			constexpr float THRESHOLD = 100.0f;  // Only check if values exceed this
-			
-			for (size_t layer_idx = 0; layer_idx < forward->hidden.size(); ++layer_idx) {
-				const auto& hidden = forward->hidden[layer_idx];
-				const size_t total = hidden.n_elements();
-				const size_t sample_size = std::min<size_t>(4096, total);
-				
-				std::vector<__half> host(sample_size);
-				hipError_t err = hipMemcpyAsync(host.data(), hidden.data(), sample_size * sizeof(__half), hipMemcpyDeviceToHost, stream);
-				if (err != hipSuccess) continue;
-				hipStreamSynchronize(stream);
-				
-				size_t nan_count = 0, inf_count = 0;
-				float max_abs = 0.0f;
-				for (size_t i = 0; i < sample_size; ++i) {
-					float v = __half2float(host[i]);
-					if (std::isnan(v)) { ++nan_count; }
-					else if (std::isinf(v)) { ++inf_count; }
-					float a = fabsf(v);
-					if (a > max_abs) max_abs = a;
-				}
-				
-				// Only print first occurrence of anomaly, then stop checking
-				if (nan_count > 0 || inf_count > 0 || max_abs > THRESHOLD) {
-					printf("[v40 FWD-HIDDEN] layer=%zu shape=[%u,%u] NaN=%zu Inf=%zu max=%.2f (first occurrence, further checks disabled)\n",
-						layer_idx, hidden.m(), hidden.n(), nan_count, inf_count, max_abs);
-					s_forward_anomaly_logged = true;
-					break;  // Stop checking remaining layers
-				}
-			}
-		}
-	}
-#endif
 
 	return forward;
 }
