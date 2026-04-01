@@ -208,11 +208,12 @@ __device__ void threadblock_layer(Activation activation, __half* __restrict__ ac
 			mma_sync(result_frag[l], act_frag, weights_frag[i], result_frag[l]);
 		}
 
-		// v19/v34: Activation function using OUT_T (same as CUDA)
+		// Activation function
 		if (BACKWARD) {
-			// Load the temporary forward matrix for the relu transfer
-			load_matrix_sync(act_frag, activation_aux + weights_col + l * 16 * WIDTH, WIDTH);
-			warp_activation_backward<OUT_T>(activation, result_frag[l], act_frag, result_frag[l]);
+			// rocWMMA fix: accumulator and matrix_a fragments have different
+			// register-to-element mappings on AMD MFMA, so we cannot do
+			// element-wise activation backward across fragment types.
+			// Instead, defer to shared-memory approach after store_matrix_sync.
 		} else {
 #if ENABLE_FUSED_MLP_DIAGNOSTICS
 			// v42: pre-/post-activation sampling on forward path (first block & lane 0)
@@ -273,14 +274,61 @@ __device__ void threadblock_layer(Activation activation, __half* __restrict__ ac
 	// v19: Minimal synchronization
 	__syncthreads();
 
-	// v19/v34: Store directly (no conversion needed when OUT_T = __half)
+	// Store MMA results to shared memory
 	TCNN_PRAGMA_UNROLL
 	for (int l = 0; l < N_ITERS; ++l) {
 		store_matrix_sync(act_shmem + weights_col + l * 16 * (WIDTH + SKEW), result_frag[l], WIDTH + SKEW, mem_row_major);
 	}
 
-	if (out_intermediate_threadblock_this_layer != nullptr) {
+	// rocWMMA fix: apply activation backward in shared memory where layout is explicit.
+	// Fragment-level backward is unsafe because accumulator and matrix_a fragments
+	// have different register-to-element mappings on AMD MFMA hardware.
+	if (BACKWARD && activation_aux != nullptr) {
 		__syncthreads();
+
+		constexpr uint32_t ROWS_PER_STEP = WAVE_SIZE / 2;
+		constexpr uint32_t STEP_ITERS = (16 * N_ITERS) / ROWS_PER_STEP;
+		TCNN_PRAGMA_UNROLL
+		for (int l = 0; l < STEP_ITERS; ++l) {
+			const uint32_t r = row + l * ROWS_PER_STEP;
+			__half* s_ptr = &act_shmem[lane_offset + r * (WIDTH + SKEW)];
+			const __half* f_ptr = &activation_aux[lane_offset + r * WIDTH];
+
+			int4 grad_val = *(int4*)s_ptr;
+			int4 fwd_val = *(int4*)f_ptr;
+			__half* g = (__half*)&grad_val;
+			const __half* f = (const __half*)&fwd_val;
+
+			TCNN_PRAGMA_UNROLL
+			for (int k = 0; k < 8; ++k) {
+				float gv = __half2float(g[k]);
+				float fv = __half2float(f[k]);
+				switch (activation) {
+					case Activation::ReLU:        gv *= (fv > 0.0f) ? 1.0f : 0.0f; break;
+					case Activation::LeakyReLU:   gv *= (fv > 0.0f) ? 1.0f : 0.01f; break;
+					case Activation::Exponential:  gv *= fv; break;
+					case Activation::Sigmoid:      gv *= fv * (1.0f - fv); break;
+					case Activation::Squareplus: {
+						float x_orig = fv - 1.0f;
+						float sq = sqrtf(x_orig * x_orig + 4.0f);
+						gv *= 0.5f * (1.0f + x_orig / sq);
+						break;
+					}
+					case Activation::Softplus:     gv *= (1.0f - expf(-fv)); break;
+					case Activation::Tanh:         gv *= (1.0f - fv * fv); break;
+					default: break;
+				}
+				g[k] = __float2half(gv);
+			}
+			*(int4*)s_ptr = grad_val;
+		}
+		__syncthreads();
+	}
+
+	if (out_intermediate_threadblock_this_layer != nullptr) {
+		if (!BACKWARD || activation_aux == nullptr) {
+			__syncthreads();
+		}
 
 		constexpr uint32_t ROWS_PER_COPY_STEP = WAVE_SIZE / 2;
 		constexpr uint32_t COPY_N_ITERS = (16 * N_ITERS) / ROWS_PER_COPY_STEP;
@@ -385,20 +433,58 @@ __global__ void kernel_mlp_fused_backward(
 			//       gradient of the last weight matrix (see backward()).
 			mma_sync(result_frag[l], act_frag, weights_frag, result_frag[l]);
 
-			// Load the temporary forward matrix for the relu transfer
-			fragment<matrix_a, 16, 16, 16, __half, row_major> forward_frag;
-			load_matrix_sync(forward_frag, forward + layer_stride * n_hidden_matmuls + weights_col + (elem_idx + l * 16) * WIDTH, WIDTH);
-
-			// v19/v34: Use warp_activation_backward<__half> (same as CUDA)
-			warp_activation_backward<__half>(ACTIVATION, result_frag[l], forward_frag, result_frag[l]);
+			// rocWMMA fix: defer activation backward to shmem (same as threadblock_layer)
 		}
 
 		__syncthreads();
 
-		// v19/v34: Store directly (no conversion needed)
+		// Store MMA results to shmem
 		TCNN_PRAGMA_UNROLL
 		for (int l = 0; l < N_ITERS; ++l) {
 			store_matrix_sync(act_shmem + weights_col + (16 * l) * (WIDTH + SKEW), result_frag[l], WIDTH + SKEW, mem_row_major);
+		}
+
+		__syncthreads();
+
+		// Apply activation backward in shared memory
+		{
+			constexpr uint32_t ROWS_PER_STEP = WAVE_SIZE / 2;
+			constexpr uint32_t STEP_ITERS = (16 * N_ITERS) / ROWS_PER_STEP;
+			const __half* fwd_base = forward + layer_stride * n_hidden_matmuls;
+			TCNN_PRAGMA_UNROLL
+			for (int l = 0; l < STEP_ITERS; ++l) {
+				const uint32_t r = row + l * ROWS_PER_STEP;
+				__half* s_ptr = &act_shmem[lane_offset + r * (WIDTH + SKEW)];
+				const __half* f_ptr = &fwd_base[lane_offset + (elem_idx + r) * WIDTH];
+
+				int4 grad_val = *(int4*)s_ptr;
+				int4 fwd_val = *(int4*)f_ptr;
+				__half* g = (__half*)&grad_val;
+				const __half* f = (const __half*)&fwd_val;
+
+				TCNN_PRAGMA_UNROLL
+				for (int k = 0; k < 8; ++k) {
+					float gv = __half2float(g[k]);
+					float fv = __half2float(f[k]);
+					switch (ACTIVATION) {
+						case Activation::ReLU:        gv *= (fv > 0.0f) ? 1.0f : 0.0f; break;
+						case Activation::LeakyReLU:   gv *= (fv > 0.0f) ? 1.0f : 0.01f; break;
+						case Activation::Exponential:  gv *= fv; break;
+						case Activation::Sigmoid:      gv *= fv * (1.0f - fv); break;
+						case Activation::Squareplus: {
+							float x_orig = fv - 1.0f;
+							float sq = sqrtf(x_orig * x_orig + 4.0f);
+							gv *= 0.5f * (1.0f + x_orig / sq);
+							break;
+						}
+						case Activation::Softplus:     gv *= (1.0f - expf(-fv)); break;
+						case Activation::Tanh:         gv *= (1.0f - fv * fv); break;
+						default: break;
+					}
+					g[k] = __float2half(gv);
+				}
+				*(int4*)s_ptr = grad_val;
+			}
 		}
 
 		__syncthreads();
