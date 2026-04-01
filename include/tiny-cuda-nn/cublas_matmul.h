@@ -83,25 +83,21 @@ void cublas_gemm(
 	hipblasSetStream(cublas_handle(), stream);
 
 	hipblasDatatype_t cuda_data_type = std::is_same<T, float>::value ? HIPBLAS_R_32F : HIPBLAS_R_16F;
-	// CRITICAL: Always use FP32 compute for numerical stability, even with FP16 data
-	// This matches NVIDIA's CUBLAS_COMPUTE_32F_FAST_16F behavior
-	// FP16 compute causes accumulation overflow and NaN
-	hipblasDatatype_t compute_type = HIPBLAS_R_32F;
+	hipblasDatatype_t compute_type = cuda_data_type;
 	hipblasGemmAlgo_t algo = HIPBLAS_GEMM_DEFAULT;
-	
-	// Since all matrices are row-major, we can use the identity (A*B)^T = B^T * A^T
-	// and compute C_cm = B_cm * A_cm, which is equivalent to C_rm = A_rm * B_rm
-	// but with swapped arguments.
-	
-	// With FP32 compute, always use float* for alpha/beta
+
+	__half alpha_half = (__half)alpha, beta_half = (__half)beta;
+	const void* alpha_ptr = std::is_same<T, float>::value ? (const void*)&alpha : (const void*)&alpha_half;
+	const void* beta_ptr  = std::is_same<T, float>::value ? (const void*)&beta  : (const void*)&beta_half;
+
 	CUBLAS_CHECK_THROW(hipblasGemmEx(
 		cublas_handle(),
 		HIPBLAS_OP_N, HIPBLAS_OP_N,
 		n, m, k,
-		&alpha,
+		alpha_ptr,
 		B.data(), cuda_data_type, B.stride(),
 		A.data(), cuda_data_type, A.stride(),
-		&beta,
+		beta_ptr,
 		C.data(), cuda_data_type, C.stride(),
 		compute_type,
 		algo
@@ -132,19 +128,21 @@ void cublas_gemm(
 	hipblasSetStream(cublas_handle(), stream);
 
 	hipblasDatatype_t cuda_data_type = std::is_same<T, float>::value ? HIPBLAS_R_32F : HIPBLAS_R_16F;
-	// CRITICAL: Always use FP32 compute for numerical stability
-	hipblasDatatype_t compute_type = HIPBLAS_R_32F;
+	hipblasDatatype_t compute_type = cuda_data_type;
 	hipblasGemmAlgo_t algo = HIPBLAS_GEMM_DEFAULT;
 
-	// With FP32 compute, always use float* for alpha/beta
+	__half alpha_half = (__half)alpha, beta_half = (__half)beta;
+	const void* alpha_ptr = std::is_same<T, float>::value ? (const void*)&alpha : (const void*)&alpha_half;
+	const void* beta_ptr  = std::is_same<T, float>::value ? (const void*)&beta  : (const void*)&beta_half;
+
 	CUBLAS_CHECK_THROW(hipblasGemmEx(
 		cublas_handle(),
 		HIPBLAS_OP_N, HIPBLAS_OP_N,
 		m, n, k,
-		&alpha,
+		alpha_ptr,
 		A.data(), cuda_data_type, A.stride(),
 		B.data(), cuda_data_type, B.stride(),
-		&beta,
+		beta_ptr,
 		C.data(), cuda_data_type, C.stride(),
 		compute_type,
 		algo
@@ -176,64 +174,46 @@ void cublas_gemm(
 	hipblasSetStream(cublas_handle(), stream);
 
 	hipblasDatatype_t cuda_data_type = std::is_same<T, float>::value ? HIPBLAS_R_32F : HIPBLAS_R_16F;
-	// CRITICAL: Always use FP32 compute for numerical stability
-	hipblasDatatype_t compute_type = HIPBLAS_R_32F;
+	hipblasDatatype_t compute_type = cuda_data_type;
 	hipblasGemmAlgo_t algo = HIPBLAS_GEMM_DEFAULT;
-	
 
-	// For mixed layouts, we need to carefully handle the transpose operations
-	// hipBLAS is column-major, so we interpret RM matrices as transposed CM matrices
-	
+	__half alpha_half = (__half)alpha, beta_half = (__half)beta;
+	const void* alpha_ptr = std::is_same<T, float>::value ? (const void*)&alpha : (const void*)&alpha_half;
+	const void* beta_ptr  = std::is_same<T, float>::value ? (const void*)&beta  : (const void*)&beta_half;
+
 	if (LC == RM) {
-		// Output is RM: C_rm (m×n) = A (m×k) * B (k×n)
-		// Use identity: C_rm = A * B ⟺ C_cm^T = B^T * A^T
-		// 
-		// Strategy: Compute C^T using hipBLAS (which outputs CM)
-		// hipBLAS computes: C_cm^T (n×m) = first_matrix * second_matrix
-		// We want: C_cm^T (n×m) = B^T (n×k) * A^T (k×m)
-		// 
-		// Key: RM matrices are already "transposed" when viewed as CM
-		// - RM (m×n, stride=n) viewed as CM is (n×m, stride=n)
-		// - So we use HIPBLAS_OP_N (no additional transpose needed)
-		// - CM matrices need HIPBLAS_OP_T to transpose them
 		hipblasOperation_t op_a = LA == RM ? HIPBLAS_OP_N : HIPBLAS_OP_T;
 		hipblasOperation_t op_b = LB == RM ? HIPBLAS_OP_N : HIPBLAS_OP_T;
-		
 
-		// Swap the operations to match the swapped matrices
-		// With FP32 compute, always use float* for alpha/beta
 		CUBLAS_CHECK_THROW(hipblasGemmEx(
 			cublas_handle(),
 			op_b, op_a,
 			n, m, k,
-			&alpha,
+			alpha_ptr,
 			B.data(), cuda_data_type, B.stride(),
 			A.data(), cuda_data_type, A.stride(),
-			&beta,
+			beta_ptr,
 			C.data(), cuda_data_type, C.stride(),
 			compute_type,
 			algo
 		));
-} else {
-		// Output is CM: use standard approach
+	} else {
 		hipblasOperation_t op_a = LA == RM ? HIPBLAS_OP_T : HIPBLAS_OP_N;
 		hipblasOperation_t op_b = LB == RM ? HIPBLAS_OP_T : HIPBLAS_OP_N;
-		
-	
-		// With FP32 compute, always use float* for alpha/beta
+
 		CUBLAS_CHECK_THROW(hipblasGemmEx(
 			cublas_handle(),
 			op_a, op_b,
 			m, n, k,
-			&alpha,
+			alpha_ptr,
 			A.data(), cuda_data_type, A.stride(),
 			B.data(), cuda_data_type, B.stride(),
-			&beta,
+			beta_ptr,
 			C.data(), cuda_data_type, C.stride(),
 			compute_type,
 			algo
 		));
-}
+	}
 
 }
 
