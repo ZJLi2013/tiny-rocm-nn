@@ -142,12 +142,13 @@ int main(int argc, char** argv) {
         GPUMatrix<__half, CM> layer1_out(WIDTH, BATCH_SIZE);
 
         // Layer 0: input -> layer0_out (with ReLU)
-        fc_multiply(hipStreamDefault, W0.transposed(), input.cm(), layer0_out, ACTIVATION);
+        // Use W0 directly (not transposed) -- verified by fused_unfused_layers_test "nn" combo
+        fc_multiply(hipStreamDefault, W0, input.cm(), layer0_out, ACTIVATION);
         CUDA_CHECK_THROW(hipStreamSynchronize(hipStreamDefault));
         std::cout << "    Layer 0 completed" << std::endl;
 
         // Layer 1: layer0_out -> layer1_out (with ReLU)
-        fc_multiply(hipStreamDefault, W1.transposed(), layer0_out, layer1_out, ACTIVATION);
+        fc_multiply(hipStreamDefault, W1, layer0_out, layer1_out, ACTIVATION);
         CUDA_CHECK_THROW(hipStreamSynchronize(hipStreamDefault));
         std::cout << "    Layer 1 completed" << std::endl;
 
