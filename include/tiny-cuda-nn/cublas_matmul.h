@@ -153,7 +153,7 @@ void cublas_gemm(
 	// CRITICAL: Always use FP32 compute for numerical stability, even with FP16 data
 	// This matches NVIDIA's CUBLAS_COMPUTE_32F_FAST_16F behavior
 	// FP16 compute causes accumulation overflow and NaN
-	hipblasComputeType_t compute_type = HIPBLAS_COMPUTE_32F;
+	hipblasDatatype_t compute_type = HIPBLAS_R_32F;
 	hipblasGemmAlgo_t algo = HIPBLAS_GEMM_DEFAULT;
 	
 	// Since all matrices are row-major, we can use the identity (A*B)^T = B^T * A^T
@@ -204,7 +204,7 @@ void cublas_gemm(
 
 	hipblasDatatype_t cuda_data_type = std::is_same<T, float>::value ? HIPBLAS_R_32F : HIPBLAS_R_16F;
 	// CRITICAL: Always use FP32 compute for numerical stability
-	hipblasComputeType_t compute_type = HIPBLAS_COMPUTE_32F;
+	hipblasDatatype_t compute_type = HIPBLAS_R_32F;
 	hipblasGemmAlgo_t algo = HIPBLAS_GEMM_DEFAULT;
 
 	// With FP32 compute, always use float* for alpha/beta
@@ -252,7 +252,7 @@ void cublas_gemm(
 
 	hipblasDatatype_t cuda_data_type = std::is_same<T, float>::value ? HIPBLAS_R_32F : HIPBLAS_R_16F;
 	// CRITICAL: Always use FP32 compute for numerical stability
-	hipblasComputeType_t compute_type = HIPBLAS_COMPUTE_32F;
+	hipblasDatatype_t compute_type = HIPBLAS_R_32F;
 	hipblasGemmAlgo_t algo = HIPBLAS_GEMM_DEFAULT;
 	
 

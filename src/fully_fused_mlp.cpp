@@ -198,7 +198,7 @@ __device__ void threadblock_layer(Activation activation, __half* __restrict__ ac
 
 	TCNN_PRAGMA_UNROLL
 	for (int l = 0; l < N_ITERS; ++l) {
-		fill_fragment(result_frag[l], 0.0f);
+		fill_fragment(result_frag[l], (__half)0.0f);
 
 		TCNN_PRAGMA_UNROLL
 		for (uint32_t i = 0; i < N_BLOCKS; ++i) {
@@ -371,7 +371,7 @@ __global__ void kernel_mlp_fused_backward(
 
 		TCNN_PRAGMA_UNROLL
 		for (int l = 0; l < N_ITERS; ++l) {
-			fill_fragment(result_frag[l], 0.0f);
+			fill_fragment(result_frag[l], (__half)0.0f);
 
 			// Load a chunk of output gradients from shared memory and multiply with previously loaded weights
 			if (std::is_same<OUTPUT_LAYOUT, row_major>::value) {
@@ -555,8 +555,8 @@ __device__ void threadblock_input_layer_forward_dynamic(Activation activation, _
 		}
 
 
-		// 1. `fill_fragment(result_frag[l], 0.0f);`
-		fill_fragment(result_frag[l], 0.0f);
+		// 1. `fill_fragment(result_frag[l], (__half)0.0f);`
+		fill_fragment(result_frag[l], (__half)0.0f);
 		TCNN_PRAGMA_UNROLL
 		// 2. `for (uint32_t i = 0; i < n_tensor_ops; ++i)`
 		for (uint32_t i = 0; i < n_tensor_ops; ++i) {
@@ -650,7 +650,7 @@ __device__ void threadblock_last_layer_forward(Activation activation, __half* __
 
 	// Perform last layer by parallelizing over iters
 	for (uint32_t idx = wi; idx < N_ITERS; idx += N_BLOCKS) {
-		fill_fragment(result_frag, 0.0f);
+		fill_fragment(result_frag, (__half)0.0f);
 		TCNN_PRAGMA_UNROLL
 		for (uint32_t i = 0; i < N_BLOCKS; ++i) {
 			// Load a chunk of intermediate activations from shared memory and multiply with chunk of the weight matrix
