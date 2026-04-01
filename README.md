@@ -6,7 +6,7 @@ This framework provides the same ["fully fused" multi-layer perceptron](data/rea
 
 ## Performance on AMD MI300X
 
-Benchmarked on AMD Instinct MI308X, ROCm 6.4.3, PyTorch 2.6.0.
+Benchmarked on AMD Instinct MI300X, ROCm 6.4.3, PyTorch 2.6.0.
 Network: 128 neurons, 5 hidden layers, OneBlob encoding (64 bins), batch size 2^18.
 
 | Configuration | Training (ms/step) | Training Throughput |
