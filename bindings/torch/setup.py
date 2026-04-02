@@ -6,7 +6,7 @@ from setuptools import setup
 import sys
 import torch
 import torch.utils.cpp_extension as _cpp_ext
-from torch.utils.cpp_extension import BuildExtension, CppExtension
+from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 
 # Monkey-patch: ROCm clang++ reports version '19.0.0git' which PyTorch's
 # parser cannot handle (int('0git') fails). This is called from both
@@ -82,6 +82,7 @@ base_cflags = [
 	"-O3",
 	"-D__HIP_PLATFORM_AMD__",
 	"-DUSE_ROCM",
+	"-UHIPBLAS_V2",
 	"-Wno-float-conversion",
 	"-fno-strict-aliasing",
 ]
@@ -123,7 +124,7 @@ else:
 rocm_include = os.path.join(ROCM_PATH, "include")
 cflags = base_cflags + base_definitions
 
-ext = CppExtension(
+ext = CUDAExtension(
 	name="tinycudann_bindings._75_C",
 	sources=base_source_files,
 	include_dirs=[
