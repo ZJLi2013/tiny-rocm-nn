@@ -1,5 +1,7 @@
 import os
+import stat
 import subprocess
+import tempfile
 from setuptools import setup
 import sys
 import torch
@@ -42,13 +44,22 @@ if not os.path.isfile(CLANGXX):
 		"Set ROCM_PATH to your ROCm installation directory."
 	)
 
-# Use ROCm's clang++ (not hipcc) as CXX so PyTorch's ABI check passes
-# (hipcc -v tries to link and fails). HIP compilation is enabled via CXXFLAGS.
-os.environ["CXX"] = CLANGXX
-os.environ["CC"] = CLANGXX
-
 rocm_arch = os.environ.get("PYTORCH_ROCM_ARCH", "gfx942")
 print(f"Targeting ROCm GPU architecture: {rocm_arch}")
+
+# Create a compiler wrapper that injects "-x hip" and offload flags BEFORE
+# the source file.  PyTorch/ninja appends extra_compile_args AFTER the source,
+# but clang requires "-x hip" to precede the input to treat .cpp as HIP.
+_wrapper_fd, _wrapper_path = tempfile.mkstemp(suffix=".sh", prefix="hipcc_wrap_")
+os.write(_wrapper_fd, f"""#!/bin/bash
+exec {CLANGXX} -x hip --rocm-path={ROCM_PATH} --offload-arch={rocm_arch} \
+  -fno-gpu-rdc -munsafe-fp-atomics "$@"
+""".encode())
+os.close(_wrapper_fd)
+os.chmod(_wrapper_path, os.stat(_wrapper_path).st_mode | stat.S_IEXEC)
+
+os.environ["CXX"] = _wrapper_path
+os.environ["CC"] = _wrapper_path
 
 # ---------------------------------------------------------------------------
 # Optional: build without neural networks
@@ -63,18 +74,8 @@ cpp_standard = 17
 print(f"Targeting C++ standard {cpp_standard}")
 
 # ---------------------------------------------------------------------------
-# Compiler flags
+# Compiler flags (appended after source — defines, warnings, etc.)
 # ---------------------------------------------------------------------------
-# Flags that MUST appear before the source file (especially "-x hip") go into
-# CXXFLAGS; extra_compile_args are appended after the source by PyTorch/ninja.
-os.environ["CXXFLAGS"] = " ".join([
-	"-x", "hip",
-	f"--rocm-path={ROCM_PATH}",
-	f"--offload-arch={rocm_arch}",
-	"-fno-gpu-rdc",
-	"-munsafe-fp-atomics",
-])
-
 base_cflags = [
 	f"-std=c++{cpp_standard}",
 	"-fPIC",
