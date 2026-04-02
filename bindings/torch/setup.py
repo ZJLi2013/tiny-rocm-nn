@@ -1,19 +1,21 @@
 import os
+import subprocess
 from setuptools import setup
 import sys
 import torch
+import torch.utils.cpp_extension as _cpp_ext
 from torch.utils.cpp_extension import BuildExtension, CppExtension
 
-
-class ROCmBuildExtension(BuildExtension):
-	"""BuildExtension subclass that skips the ABI check.
-
-	ROCm's clang++ reports version '19.0.0git' which PyTorch's version
-	parser cannot handle (int('0git') fails). The ABI check is only
-	relevant for GCC<5 vs libstdc++ compatibility and not needed here.
-	"""
-	def _check_abi(self):
-		return "clang", (19, 0, 0)
+# Monkey-patch: ROCm clang++ reports version '19.0.0git' which PyTorch's
+# parser cannot handle (int('0git') fails). This is called from both
+# BuildExtension._check_abi() and _write_ninja_file_and_compile_objects().
+_original_get_compiler_abi = _cpp_ext.get_compiler_abi_compatibility_and_version
+def _patched_get_compiler_abi(compiler):
+	try:
+		return _original_get_compiler_abi(compiler)
+	except (ValueError, subprocess.CalledProcessError):
+		return True, (19, 0, 0)
+_cpp_ext.get_compiler_abi_compatibility_and_version = _patched_get_compiler_abi
 
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 ROOT_DIR = os.path.dirname(os.path.dirname(SCRIPT_DIR))
@@ -163,5 +165,5 @@ setup(
 	include_package_data=True,
 	zip_safe=False,
 	ext_modules=[ext],
-	cmdclass={"build_ext": ROCmBuildExtension},
+	cmdclass={"build_ext": BuildExtension},
 )
