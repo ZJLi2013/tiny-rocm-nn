@@ -6,7 +6,7 @@ from setuptools import setup
 import sys
 import torch
 import torch.utils.cpp_extension as _cpp_ext
-from torch.utils.cpp_extension import BuildExtension, CppExtension, include_paths, library_paths
+from torch.utils.cpp_extension import BuildExtension, CppExtension
 
 # Monkey-patch: ROCm clang++ reports version '19.0.0git' which PyTorch's
 # parser cannot handle (int('0git') fails). This is called from both
@@ -135,10 +135,10 @@ ext = CppExtension(
 		os.path.join(rocm_include, "rocwmma"),
 		os.path.join(rocm_include, "hipblas"),
 		os.path.join(rocm_include, "rocblas"),
-	] + include_paths(cuda=True),
+	],
 	extra_compile_args={"cxx": cflags},
-	libraries=["amdhip64", "hipblas", "rocblas", "c10_hip", "torch_hip"],
-	library_dirs=[os.path.join(ROCM_PATH, "lib")] + library_paths(cuda=True),
+	libraries=["amdhip64", "hipblas", "rocblas"],
+	library_dirs=[os.path.join(ROCM_PATH, "lib")],
 )
 
 # ---------------------------------------------------------------------------
