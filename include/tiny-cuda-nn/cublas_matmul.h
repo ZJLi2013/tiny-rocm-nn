@@ -252,7 +252,8 @@ if (split_k_slices == 1) {
 
 	const int k = A.n();
 	if (k % split_k_slices != 0) {
-		throw std::runtime_error("split_k_slices must evenly divide k");
+		cublas_gemm(stream, A, B, C, 1.0f, beta);
+		return;
 	}
 	const int k_slice = k / split_k_slices;
 
@@ -284,7 +285,8 @@ void fc_multiply_split_k(hipStream_t stream, const GPUMatrix<T, LA>& A, const GP
 
 	const int k = A.n();
 	if (k % split_k_slices != 0) {
-		throw std::runtime_error("split_k_slices must evenly divide k");
+		cublas_gemm(stream, A, B, C_mutable, 1.0f, beta);
+		return;
 	}
 	const int k_slice = k / split_k_slices;
 

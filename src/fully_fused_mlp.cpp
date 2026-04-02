@@ -941,6 +941,9 @@ void FullyFusedMLP<T, WIDTH>::backward_impl(
 	const auto& forward = dynamic_cast<const ForwardContext&>(ctx);
 
 	int split_k_factor = batch_size / std::min((uint32_t)(1 << 12), batch_size);
+	while (split_k_factor > 1 && batch_size % split_k_factor != 0) {
+		split_k_factor--;
+	}
 
 	const GPUMatrixDynamic<T>& tmp_dL_doutput = m_output_activation == Activation::None ? dL_doutput : backward_output_tmp;
 
