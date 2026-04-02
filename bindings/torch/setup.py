@@ -161,6 +161,7 @@ ext = CppExtension(
 	name="tinycudann_bindings._75_C",
 	sources=base_source_files,
 	include_dirs=[
+		os.path.join(bindings_dir, "include", "cuda_compat"),
 		f"{root_dir}/include",
 		f"{root_dir}/dependencies",
 		f"{root_dir}/dependencies/fmt/include",
