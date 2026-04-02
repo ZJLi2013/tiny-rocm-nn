@@ -43,7 +43,7 @@ if not os.path.isfile(CLANGXX):
 	)
 
 # Use ROCm's clang++ (not hipcc) as CXX so PyTorch's ABI check passes
-# (hipcc -v tries to link and fails). HIP compilation is enabled via -x hip flag.
+# (hipcc -v tries to link and fails). HIP compilation is enabled via CXXFLAGS.
 os.environ["CXX"] = CLANGXX
 os.environ["CC"] = CLANGXX
 
@@ -63,21 +63,26 @@ cpp_standard = 17
 print(f"Targeting C++ standard {cpp_standard}")
 
 # ---------------------------------------------------------------------------
-# Compiler flags (ROCm clang++ with -x hip)
+# Compiler flags
 # ---------------------------------------------------------------------------
-base_cflags = [
+# Flags that MUST appear before the source file (especially "-x hip") go into
+# CXXFLAGS; extra_compile_args are appended after the source by PyTorch/ninja.
+os.environ["CXXFLAGS"] = " ".join([
 	"-x", "hip",
 	f"--rocm-path={ROCM_PATH}",
+	f"--offload-arch={rocm_arch}",
+	"-fno-gpu-rdc",
+	"-munsafe-fp-atomics",
+])
+
+base_cflags = [
 	f"-std=c++{cpp_standard}",
 	"-fPIC",
 	"-O3",
-	f"--offload-arch={rocm_arch}",
 	"-D__HIP_PLATFORM_AMD__",
 	"-DUSE_ROCM",
 	"-Wno-float-conversion",
 	"-fno-strict-aliasing",
-	"-fno-gpu-rdc",
-	"-munsafe-fp-atomics",
 ]
 
 os.environ["TORCH_CUDA_ARCH_LIST"] = ""
