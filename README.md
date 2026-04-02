@@ -106,6 +106,63 @@ GPUMatrix<float> inference_outputs(n_output_dims, batch_size);
 model.network->inference(inference_inputs, inference_outputs);
 ```
 
+## Usage (Python API / PyTorch Extension)
+
+### Installation
+
+```sh
+cd tiny-rocm-nn/bindings/torch
+pip install --no-build-isolation .
+```
+
+Set `PYTORCH_ROCM_ARCH` if needed (e.g., `export PYTORCH_ROCM_ARCH=gfx942`).
+
+### Training Example
+
+```python
+import torch
+import tinycudann as tcnn
+
+device = torch.device("cuda")
+
+model = tcnn.NetworkWithInputEncoding(
+    n_input_dims=2, n_output_dims=3,
+    encoding_config={
+        "otype": "HashGrid",
+        "n_levels": 16, "n_features_per_level": 2,
+        "log2_hashmap_size": 15, "base_resolution": 16,
+        "per_level_scale": 1.5,
+    },
+    network_config={
+        "otype": "FullyFusedMLP",
+        "activation": "ReLU", "output_activation": "None",
+        "n_neurons": 64, "n_hidden_layers": 2,
+    },
+).to(device)
+
+optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
+
+batch = torch.rand([2**18, 2], device=device)
+targets = torch.rand([2**18, 3], device=device, dtype=model.dtype)
+
+output = model(batch)
+loss = ((output - targets) ** 2).mean()
+optimizer.zero_grad()
+loss.backward()
+optimizer.step()
+```
+
+Encoding and Network can also be used standalone:
+
+```python
+encoding = tcnn.Encoding(n_input_dims=2, encoding_config={"otype": "HashGrid", ...})
+network  = tcnn.Network(n_input_dims=encoding.n_output_dims, n_output_dims=3,
+                         network_config={"otype": "FullyFusedMLP", ...})
+# Use as standard torch.nn.Module
+```
+
+A full image-fitting sample is provided at `samples/mlp_learning_an_image_pytorch.py`.
+
 ## Porting Notes (CUDA → ROCm)
 
 Key adaptations made during the port:
