@@ -1,28 +1,38 @@
 import os
-import stat
 import subprocess
-import tempfile
 from setuptools import setup
 import sys
 import torch
 import torch.utils.cpp_extension as _cpp_ext
 from torch.utils.cpp_extension import BuildExtension, CppExtension
 
-# Monkey-patch: ROCm clang++ reports version '19.0.0git' which PyTorch's
-# parser cannot handle (int('0git') fails). This is called from both
-# BuildExtension._check_abi() and _write_ninja_file_and_compile_objects().
+# ---------------------------------------------------------------------------
+# Monkey-patch PyTorch's compiler checks for ROCm hipcc compatibility.
+#
+# Problem 1: hipcc -v invokes the linker (fails with "undefined main").
+# Problem 2: ROCm clang++ reports version "19.0.0git" (int('0git') fails).
+#
+# Fix: patch check_compiler_ok_for_platform to accept hipcc/ROCm compilers,
+# and patch get_compiler_abi_compatibility_and_version to handle parse errors.
+# ---------------------------------------------------------------------------
+_original_check_compiler = _cpp_ext.check_compiler_ok_for_platform
+def _patched_check_compiler(compiler):
+	if "hipcc" in str(compiler) or "rocm" in str(compiler).lower():
+		return True
+	return _original_check_compiler(compiler)
+_cpp_ext.check_compiler_ok_for_platform = _patched_check_compiler
+
 _original_get_compiler_abi = _cpp_ext.get_compiler_abi_compatibility_and_version
 def _patched_get_compiler_abi(compiler):
 	try:
 		return _original_get_compiler_abi(compiler)
-	except (ValueError, subprocess.CalledProcessError):
+	except (ValueError, subprocess.CalledProcessError, OSError):
 		return True, (19, 0, 0)
 _cpp_ext.get_compiler_abi_compatibility_and_version = _patched_get_compiler_abi
 
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 ROOT_DIR = os.path.dirname(os.path.dirname(SCRIPT_DIR))
 
-# Find version of tiny-rocm-nn by scraping CMakeLists.txt
 with open(os.path.join(ROOT_DIR, "CMakeLists.txt"), "r") as cmakelists:
 	for line in cmakelists.readlines():
 		if line.strip().startswith("VERSION"):
@@ -35,31 +45,19 @@ print(f"Building PyTorch extension for tiny-rocm-nn version {VERSION}")
 # ROCm / HIP setup
 # ---------------------------------------------------------------------------
 ROCM_PATH = os.environ.get("ROCM_PATH", "/opt/rocm")
-ROCM_LLVM_BIN = os.path.join(ROCM_PATH, "lib", "llvm", "bin")
-CLANGXX = os.path.join(ROCM_LLVM_BIN, "clang++")
+HIPCC = os.path.join(ROCM_PATH, "bin", "hipcc")
 
-if not os.path.isfile(CLANGXX):
+if not os.path.isfile(HIPCC):
 	raise EnvironmentError(
-		f"ROCm clang++ not found at {CLANGXX}. "
+		f"hipcc not found at {HIPCC}. "
 		"Set ROCM_PATH to your ROCm installation directory."
 	)
 
+os.environ["CXX"] = HIPCC
+os.environ["CC"] = HIPCC
+
 rocm_arch = os.environ.get("PYTORCH_ROCM_ARCH", "gfx942")
 print(f"Targeting ROCm GPU architecture: {rocm_arch}")
-
-# Create a compiler wrapper that injects "-x hip" and offload flags BEFORE
-# the source file.  PyTorch/ninja appends extra_compile_args AFTER the source,
-# but clang requires "-x hip" to precede the input to treat .cpp as HIP.
-_wrapper_fd, _wrapper_path = tempfile.mkstemp(suffix=".sh", prefix="hipcc_wrap_")
-os.write(_wrapper_fd, f"""#!/bin/bash
-exec {CLANGXX} -x hip --rocm-path={ROCM_PATH} --offload-arch={rocm_arch} \
-  -fno-gpu-rdc -munsafe-fp-atomics "$@"
-""".encode())
-os.close(_wrapper_fd)
-os.chmod(_wrapper_path, os.stat(_wrapper_path).st_mode | stat.S_IEXEC)
-
-os.environ["CXX"] = _wrapper_path
-os.environ["CC"] = _wrapper_path
 
 # ---------------------------------------------------------------------------
 # Optional: build without neural networks
@@ -74,17 +72,20 @@ cpp_standard = 17
 print(f"Targeting C++ standard {cpp_standard}")
 
 # ---------------------------------------------------------------------------
-# Compiler flags (appended after source — defines, warnings, etc.)
+# Compiler flags (hipcc handles -x hip internally)
 # ---------------------------------------------------------------------------
 base_cflags = [
 	f"-std=c++{cpp_standard}",
 	"-fPIC",
 	"-O3",
+	f"--offload-arch={rocm_arch}",
 	"-D__HIP_PLATFORM_AMD__",
 	"-DUSE_ROCM",
 	"-UHIPBLAS_V2",
 	"-Wno-float-conversion",
 	"-fno-strict-aliasing",
+	"-fno-gpu-rdc",
+	"-munsafe-fp-atomics",
 ]
 
 os.environ["TORCH_CUDA_ARCH_LIST"] = ""
