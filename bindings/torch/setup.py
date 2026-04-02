@@ -59,7 +59,7 @@ print(f"Targeting ROCm GPU architecture: {rocm_arch}")
 # back to the system g++ for pure host code (bindings.cpp).  bindings.cpp
 # includes deep PyTorch ATen headers whose internal generated files are not
 # installed in the pip package, so it must compile as plain C++.
-_host_cxx = "/usr/bin/g++"
+CLANGXX = os.path.join(ROCM_PATH, "lib", "llvm", "bin", "clang++")
 _wrapper_fd, _wrapper_path = tempfile.mkstemp(suffix=".sh", prefix="hipcc_wrap_")
 os.write(_wrapper_fd, f'''#!/bin/bash
 IS_BINDINGS=0
@@ -70,11 +70,11 @@ if [ "$IS_BINDINGS" = "1" ]; then
   ARGS=()
   for arg in "$@"; do
     case "$arg" in
-      --rocm-path=*|--offload-arch=*|-fno-gpu-rdc|-munsafe-fp-atomics) ;;
+      --offload-arch=*|-fno-gpu-rdc|-munsafe-fp-atomics|-UHIPBLAS_V2) ;;
       *) ARGS+=("$arg") ;;
     esac
   done
-  exec {_host_cxx} "${{ARGS[@]}}"
+  exec {CLANGXX} -x hip --rocm-path={ROCM_PATH} "${{ARGS[@]}}"
 fi
 exec {HIPCC} "$@"
 '''.encode())
