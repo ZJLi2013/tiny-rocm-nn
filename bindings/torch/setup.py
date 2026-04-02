@@ -62,11 +62,20 @@ print(f"Targeting ROCm GPU architecture: {rocm_arch}")
 _host_cxx = "/usr/bin/g++"
 _wrapper_fd, _wrapper_path = tempfile.mkstemp(suffix=".sh", prefix="hipcc_wrap_")
 os.write(_wrapper_fd, f'''#!/bin/bash
+IS_BINDINGS=0
 for arg in "$@"; do
-  case "$arg" in
-    */bindings.cpp) exec {_host_cxx} "$@"; exit ;;
-  esac
+  case "$arg" in */bindings.cpp) IS_BINDINGS=1 ;; esac
 done
+if [ "$IS_BINDINGS" = "1" ]; then
+  ARGS=()
+  for arg in "$@"; do
+    case "$arg" in
+      --rocm-path=*|--offload-arch=*|-fno-gpu-rdc|-munsafe-fp-atomics) ;;
+      *) ARGS+=("$arg") ;;
+    esac
+  done
+  exec {_host_cxx} "${{ARGS[@]}}"
+fi
 exec {HIPCC} "$@"
 '''.encode())
 os.close(_wrapper_fd)
