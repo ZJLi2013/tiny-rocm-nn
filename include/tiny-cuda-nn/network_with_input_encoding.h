@@ -91,7 +91,7 @@ public:
 	virtual ~NetworkWithInputEncoding() { }
 
 	void inference_mixed_precision_impl(hipStream_t stream, const GPUMatrixDynamic<float>& input, GPUMatrixDynamic<T>& output, bool use_inference_params = true) override {
-		GPUMatrixDynamic<T> network_input = {m_encoding->padded_output_width(), input.n(), stream, m_encoding->preferred_output_layout()};
+		GPUMatrixDynamic<T> network_input = {m_encoding->padded_output_width(), input.n(), stream, CM};
 		m_encoding->inference_mixed_precision(stream, input, network_input, use_inference_params);
 		m_network->inference_mixed_precision(stream, network_input, output, use_inference_params);
 	}
@@ -125,7 +125,9 @@ public:
 		// 它封装了指向GPU内存的指针，并提供了对矩阵属性（如维度、布局）的访问，简化了在CUDA核心函数之间传递矩阵数据的过程。
 		// 在下面这行代码中，它被用来创建一个临时的GPU矩阵 `network_input`，
 		// 用于存储编码层(m_encoding)的输出结果。这个结果随后将作为下一层神经网络(m_network)的输入。
-		forward->network_input = GPUMatrixDynamic<T>{m_encoding->padded_output_width(), input.n(), stream, m_encoding->preferred_output_layout()};
+		// Use CM layout so the FullyFusedMLP backward can use its fused dL_dinput kernel.
+		// The encoding handles both layouts (grid.h transposes internally when needed).
+		forward->network_input = GPUMatrixDynamic<T>{m_encoding->padded_output_width(), input.n(), stream, CM};
 		forward->encoding_ctx = m_encoding->forward(stream, input, &forward->network_input, use_inference_params, prepare_input_gradients);
 		forward->network_ctx = m_network->forward(stream, forward->network_input, output, use_inference_params, true);
 
@@ -161,7 +163,7 @@ public:
 	) override {
 		GPUMatrixDynamic<T> dL_dnetwork_input;
 		if (m_encoding->n_params() > 0 || dL_dinput) {
-			dL_dnetwork_input = {m_encoding->padded_output_width(), input.n(), stream, m_encoding->preferred_output_layout()};
+			dL_dnetwork_input = {m_encoding->padded_output_width(), input.n(), stream, CM};
 		}
 
 		const auto& forward = dynamic_cast<const ForwardContext&>(ctx);
@@ -228,7 +230,7 @@ public:
 
 	std::pair<const T*, MatrixLayout> forward_activations(const Context& ctx, uint32_t layer) const override {
 		const auto& forward = dynamic_cast<const ForwardContext&>(ctx);
-		return layer == 0 ? std::make_pair<const T*, MatrixLayout>(forward.network_input.data(), m_encoding->preferred_output_layout()) : m_network->forward_activations(*forward.network_ctx, layer - 1);
+		return layer == 0 ? std::make_pair<const T*, MatrixLayout>(forward.network_input.data(), CM) : m_network->forward_activations(*forward.network_ctx, layer - 1);
 	}
 
 	uint32_t input_width() const override {
