@@ -20,16 +20,19 @@ print(f"Building PyTorch extension for tiny-rocm-nn version {VERSION}")
 # ROCm / HIP setup
 # ---------------------------------------------------------------------------
 ROCM_PATH = os.environ.get("ROCM_PATH", "/opt/rocm")
-HIPCC = os.path.join(ROCM_PATH, "bin", "hipcc")
+ROCM_LLVM_BIN = os.path.join(ROCM_PATH, "lib", "llvm", "bin")
+CLANGXX = os.path.join(ROCM_LLVM_BIN, "clang++")
 
-if not os.path.isfile(HIPCC):
+if not os.path.isfile(CLANGXX):
 	raise EnvironmentError(
-		f"hipcc not found at {HIPCC}. "
+		f"ROCm clang++ not found at {CLANGXX}. "
 		"Set ROCM_PATH to your ROCm installation directory."
 	)
 
-os.environ["CXX"] = HIPCC
-os.environ["CC"] = HIPCC
+# Use ROCm's clang++ (not hipcc) as CXX so PyTorch's ABI check passes
+# (hipcc -v tries to link and fails). HIP compilation is enabled via -x hip flag.
+os.environ["CXX"] = CLANGXX
+os.environ["CC"] = CLANGXX
 
 rocm_arch = os.environ.get("PYTORCH_ROCM_ARCH", "gfx942")
 print(f"Targeting ROCm GPU architecture: {rocm_arch}")
@@ -47,9 +50,11 @@ cpp_standard = 17
 print(f"Targeting C++ standard {cpp_standard}")
 
 # ---------------------------------------------------------------------------
-# Compiler flags (hipcc)
+# Compiler flags (ROCm clang++ with -x hip)
 # ---------------------------------------------------------------------------
 base_cflags = [
+	"-x", "hip",
+	f"--rocm-path={ROCM_PATH}",
 	f"-std=c++{cpp_standard}",
 	"-fPIC",
 	"-O3",
