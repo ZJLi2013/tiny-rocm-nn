@@ -230,7 +230,7 @@ public:
 
 	std::pair<const T*, MatrixLayout> forward_activations(const Context& ctx, uint32_t layer) const override {
 		const auto& forward = dynamic_cast<const ForwardContext&>(ctx);
-		return layer == 0 ? std::make_pair<const T*, MatrixLayout>(forward.network_input.data(), CM) : m_network->forward_activations(*forward.network_ctx, layer - 1);
+		return layer == 0 ? std::pair<const T*, MatrixLayout>{forward.network_input.data(), CM} : m_network->forward_activations(*forward.network_ctx, layer - 1);
 	}
 
 	uint32_t input_width() const override {
