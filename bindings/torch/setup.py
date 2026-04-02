@@ -1,7 +1,5 @@
 import os
-import stat
 import subprocess
-import tempfile
 from setuptools import setup
 import sys
 import torch
@@ -55,34 +53,9 @@ if not os.path.isfile(HIPCC):
 rocm_arch = os.environ.get("PYTORCH_ROCM_ARCH", "gfx942")
 print(f"Targeting ROCm GPU architecture: {rocm_arch}")
 
-# Create a compiler wrapper that uses hipcc for HIP device sources and falls
-# back to the system g++ for pure host code (bindings.cpp).  bindings.cpp
-# includes deep PyTorch ATen headers whose internal generated files are not
-# installed in the pip package, so it must compile as plain C++.
-CLANGXX = os.path.join(ROCM_PATH, "lib", "llvm", "bin", "clang++")
-_wrapper_fd, _wrapper_path = tempfile.mkstemp(suffix=".sh", prefix="hipcc_wrap_")
-os.write(_wrapper_fd, f'''#!/bin/bash
-IS_BINDINGS=0
-for arg in "$@"; do
-  case "$arg" in */bindings.cpp) IS_BINDINGS=1 ;; esac
-done
-if [ "$IS_BINDINGS" = "1" ]; then
-  ARGS=()
-  for arg in "$@"; do
-    case "$arg" in
-      --offload-arch=*|-fno-gpu-rdc|-munsafe-fp-atomics|-UHIPBLAS_V2) ;;
-      *) ARGS+=("$arg") ;;
-    esac
-  done
-  exec {CLANGXX} -x hip --rocm-path={ROCM_PATH} "${{ARGS[@]}}"
-fi
-exec {HIPCC} "$@"
-'''.encode())
-os.close(_wrapper_fd)
-os.chmod(_wrapper_path, os.stat(_wrapper_path).st_mode | stat.S_IEXEC)
-
-os.environ["CXX"] = _wrapper_path
-os.environ["CC"] = _wrapper_path
+# Use hipcc for all source files (device + host code).
+os.environ["CXX"] = HIPCC
+os.environ["CC"] = HIPCC
 
 # ---------------------------------------------------------------------------
 # Optional: build without neural networks
@@ -161,7 +134,6 @@ ext = CppExtension(
 	name="tinycudann_bindings._75_C",
 	sources=base_source_files,
 	include_dirs=[
-		os.path.join(bindings_dir, "include", "cuda_compat"),
 		f"{root_dir}/include",
 		f"{root_dir}/dependencies",
 		f"{root_dir}/dependencies/fmt/include",

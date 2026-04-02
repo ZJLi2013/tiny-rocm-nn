@@ -34,8 +34,9 @@
 #include <torch/extension.h>
 #endif
 
-#include <ATen/cuda/CUDAUtils.h>
-#include <c10/cuda/CUDAGuard.h>
+#include <ATen/hip/HIPUtils.h>
+#include <ATen/hip/impl/HIPGuardImplMasqueradingAsCUDA.h>
+#include <ATen/hip/impl/HIPStreamMasqueradingAsCUDA.h>
 
 #ifdef snprintf
 #undef snprintf
@@ -92,8 +93,8 @@ public:
 		at::Device device = input.device();
 		CHECK_THROW(device == params.device());
 
-		const at::cuda::CUDAGuard device_guard{device};
-		cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+		const c10::hip::HIPGuardMasqueradingAsCUDA device_guard{device};
+		hipStream_t stream = c10::hip::getCurrentHIPStreamMasqueradingAsCUDA();
 
 		uint32_t batch_size = input.size(0);
 
@@ -138,8 +139,8 @@ public:
 		CHECK_THROW(device == output.device());
 		CHECK_THROW(device == dL_doutput.device());
 
-		const at::cuda::CUDAGuard device_guard{device};
-		cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+		const c10::hip::HIPGuardMasqueradingAsCUDA device_guard{device};
+		hipStream_t stream = c10::hip::getCurrentHIPStreamMasqueradingAsCUDA();
 
 		uint32_t batch_size = input.size(0);
 
@@ -203,8 +204,8 @@ public:
 		CHECK_THROW(device == dL_ddLdinput.device());
 		CHECK_THROW(device == dL_doutput.device());
 
-		const at::cuda::CUDAGuard device_guard{device};
-		cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+		const c10::hip::HIPGuardMasqueradingAsCUDA device_guard{device};
+		hipStream_t stream = c10::hip::getCurrentHIPStreamMasqueradingAsCUDA();
 
 		uint32_t batch_size = input.size(0);
 
