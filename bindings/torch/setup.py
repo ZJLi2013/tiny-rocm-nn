@@ -1,5 +1,7 @@
 import os
+import stat
 import subprocess
+import tempfile
 from setuptools import setup
 import sys
 import torch
@@ -11,9 +13,6 @@ from torch.utils.cpp_extension import BuildExtension, CppExtension
 #
 # Problem 1: hipcc -v invokes the linker (fails with "undefined main").
 # Problem 2: ROCm clang++ reports version "19.0.0git" (int('0git') fails).
-#
-# Fix: patch check_compiler_ok_for_platform to accept hipcc/ROCm compilers,
-# and patch get_compiler_abi_compatibility_and_version to handle parse errors.
 # ---------------------------------------------------------------------------
 _original_check_compiler = _cpp_ext.check_compiler_ok_for_platform
 def _patched_check_compiler(compiler):
@@ -53,11 +52,28 @@ if not os.path.isfile(HIPCC):
 		"Set ROCM_PATH to your ROCm installation directory."
 	)
 
-os.environ["CXX"] = HIPCC
-os.environ["CC"] = HIPCC
-
 rocm_arch = os.environ.get("PYTORCH_ROCM_ARCH", "gfx942")
 print(f"Targeting ROCm GPU architecture: {rocm_arch}")
+
+# Create a compiler wrapper that uses hipcc for HIP device sources and falls
+# back to the system g++ for pure host code (bindings.cpp).  bindings.cpp
+# includes deep PyTorch ATen headers whose internal generated files are not
+# installed in the pip package, so it must compile as plain C++.
+_host_cxx = "/usr/bin/g++"
+_wrapper_fd, _wrapper_path = tempfile.mkstemp(suffix=".sh", prefix="hipcc_wrap_")
+os.write(_wrapper_fd, f'''#!/bin/bash
+for arg in "$@"; do
+  case "$arg" in
+    */bindings.cpp) exec {_host_cxx} "$@"; exit ;;
+  esac
+done
+exec {HIPCC} "$@"
+'''.encode())
+os.close(_wrapper_fd)
+os.chmod(_wrapper_path, os.stat(_wrapper_path).st_mode | stat.S_IEXEC)
+
+os.environ["CXX"] = _wrapper_path
+os.environ["CC"] = _wrapper_path
 
 # ---------------------------------------------------------------------------
 # Optional: build without neural networks
@@ -72,7 +88,7 @@ cpp_standard = 17
 print(f"Targeting C++ standard {cpp_standard}")
 
 # ---------------------------------------------------------------------------
-# Compiler flags (hipcc handles -x hip internally)
+# Compiler flags
 # ---------------------------------------------------------------------------
 arch_flags = []
 for arch in rocm_arch.replace(",", ";").split(";"):
@@ -136,7 +152,6 @@ ext = CppExtension(
 	name="tinycudann_bindings._75_C",
 	sources=base_source_files,
 	include_dirs=[
-		os.path.join(bindings_dir, "include", "cuda_compat"),
 		f"{root_dir}/include",
 		f"{root_dir}/dependencies",
 		f"{root_dir}/dependencies/fmt/include",
