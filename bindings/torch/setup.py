@@ -1,219 +1,182 @@
 import os
-
-import re
-from setuptools import setup
-from pkg_resources import parse_version
 import subprocess
-import shutil
+from setuptools import setup
 import sys
 import torch
-from glob import glob
-from torch.utils.cpp_extension import BuildExtension, CUDAExtension
+import torch.utils.cpp_extension as _cpp_ext
+from torch.utils.cpp_extension import BuildExtension, CppExtension
+
+# ---------------------------------------------------------------------------
+# Monkey-patch PyTorch's compiler checks for ROCm hipcc compatibility.
+#
+# Problem 1: hipcc -v invokes the linker (fails with "undefined main").
+# Problem 2: ROCm clang++ reports version "19.0.0git" (int('0git') fails).
+# ---------------------------------------------------------------------------
+_original_check_compiler = _cpp_ext.check_compiler_ok_for_platform
+def _patched_check_compiler(compiler):
+	if "hipcc" in str(compiler) or "rocm" in str(compiler).lower():
+		return True
+	return _original_check_compiler(compiler)
+_cpp_ext.check_compiler_ok_for_platform = _patched_check_compiler
+
+_original_get_compiler_abi = _cpp_ext.get_compiler_abi_compatibility_and_version
+def _patched_get_compiler_abi(compiler):
+	try:
+		return _original_get_compiler_abi(compiler)
+	except (ValueError, subprocess.CalledProcessError, OSError):
+		return True, (19, 0, 0)
+_cpp_ext.get_compiler_abi_compatibility_and_version = _patched_get_compiler_abi
 
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 ROOT_DIR = os.path.dirname(os.path.dirname(SCRIPT_DIR))
 
-def min_supported_compute_capability(cuda_version):
-	if cuda_version >= parse_version("12.0"):
-		return 50
-	else:
-		return 20
-
-def max_supported_compute_capability(cuda_version):
-	if cuda_version < parse_version("11.0"):
-		return 75
-	elif cuda_version < parse_version("11.1"):
-		return 80
-	elif cuda_version < parse_version("11.8"):
-		return 86
-	else:
-		return 90
-
-# Find version of tinycudann by scraping CMakeLists.txt
 with open(os.path.join(ROOT_DIR, "CMakeLists.txt"), "r") as cmakelists:
 	for line in cmakelists.readlines():
 		if line.strip().startswith("VERSION"):
 			VERSION = line.split("VERSION")[-1].strip()
 			break
 
-print(f"Building PyTorch extension for tiny-cuda-nn version {VERSION}")
+print(f"Building PyTorch extension for tiny-rocm-nn version {VERSION}")
 
-ext_modules = []
+# ---------------------------------------------------------------------------
+# ROCm / HIP setup
+# ---------------------------------------------------------------------------
+ROCM_PATH = os.environ.get("ROCM_PATH", "/opt/rocm")
+HIPCC = os.path.join(ROCM_PATH, "bin", "hipcc")
 
-if "TCNN_CUDA_ARCHITECTURES" in os.environ and os.environ["TCNN_CUDA_ARCHITECTURES"]:
-	compute_capabilities = [int(x) for x in os.environ["TCNN_CUDA_ARCHITECTURES"].replace(";", ",").split(",")]
-	print(f"Obtained compute capabilities {compute_capabilities} from environment variable TCNN_CUDA_ARCHITECTURES")
-elif torch.cuda.is_available():
-	major, minor = torch.cuda.get_device_capability()
-	compute_capabilities = [major * 10 + minor]
-	print(f"Obtained compute capability {compute_capabilities[0]} from PyTorch")
-else:
-	raise EnvironmentError("Unknown compute capability. Specify the target compute capabilities in the TCNN_CUDA_ARCHITECTURES environment variable or install PyTorch with the CUDA backend to detect it automatically.")
+if not os.path.isfile(HIPCC):
+	raise EnvironmentError(
+		f"hipcc not found at {HIPCC}. "
+		"Set ROCM_PATH to your ROCm installation directory."
+	)
 
+rocm_arch = os.environ.get("PYTORCH_ROCM_ARCH", "gfx942")
+print(f"Targeting ROCm GPU architecture: {rocm_arch}")
+
+# Use hipcc for all source files (device + host code).
+os.environ["CXX"] = HIPCC
+os.environ["CC"] = HIPCC
+
+# ---------------------------------------------------------------------------
+# Optional: build without neural networks
+# ---------------------------------------------------------------------------
 include_networks = True
 if "--no-networks" in sys.argv:
 	include_networks = False
 	sys.argv.remove("--no-networks")
 	print("Building >> without << neural networks (just the input encodings)")
 
-if os.name == "nt":
-	def find_cl_path():
-		import glob
-		for executable in ["Program Files (x86)", "Program Files"]:
-			for edition in ["Enterprise", "Professional", "BuildTools", "Community"]:
-				paths = sorted(glob.glob(f"C:\\{executable}\\Microsoft Visual Studio\\*\\{edition}\\VC\\Tools\\MSVC\\*\\bin\\Hostx64\\x64"), reverse=True)
-				if paths:
-					return paths[0]
-
-	# If cl.exe is not on path, try to find it.
-	if os.system("where cl.exe >nul 2>nul") != 0:
-		cl_path = find_cl_path()
-		if cl_path is None:
-			raise RuntimeError("Could not locate a supported Microsoft Visual C++ installation")
-		os.environ["PATH"] += ";" + cl_path
-	else:
-		# cl.exe was found in PATH, so we can assume that the user is already in a developer command prompt
-		# In this case, BuildExtensions requires the following environment variable to be set such that it
-		# won't try to activate a developer command prompt a second time.
-		os.environ["DISTUTILS_USE_SDK"] = "1"
-
-cpp_standard = 14
-
-# Get CUDA version and make sure the targeted compute capability is compatible
-if os.system("nvcc --version") == 0:
-	nvcc_out = subprocess.check_output(["nvcc", "--version"]).decode()
-	cuda_version = re.search(r"release (\S+),", nvcc_out)
-
-	if cuda_version:
-		cuda_version = parse_version(cuda_version.group(1))
-		print(f"Detected CUDA version {cuda_version}")
-		if cuda_version >= parse_version("11.0"):
-			cpp_standard = 17
-
-		supported_compute_capabilities = [
-			cc for cc in compute_capabilities if cc >= min_supported_compute_capability(cuda_version) and cc <= max_supported_compute_capability(cuda_version)
-		]
-
-		if not supported_compute_capabilities:
-			supported_compute_capabilities = [max_supported_compute_capability(cuda_version)]
-
-		if supported_compute_capabilities != compute_capabilities:
-			print(f"WARNING: Compute capabilities {compute_capabilities} are not all supported by the installed CUDA version {cuda_version}. Targeting {supported_compute_capabilities} instead.")
-			compute_capabilities = supported_compute_capabilities
-
-min_compute_capability = min(compute_capabilities)
-
+cpp_standard = 17
 print(f"Targeting C++ standard {cpp_standard}")
 
-base_nvcc_flags = [
+# ---------------------------------------------------------------------------
+# Compiler flags
+# ---------------------------------------------------------------------------
+arch_flags = []
+for arch in rocm_arch.replace(",", ";").split(";"):
+	arch = arch.strip()
+	if arch:
+		arch_flags.append(f"--offload-arch={arch}")
+
+base_cflags = [
 	f"-std=c++{cpp_standard}",
-	"--extended-lambda",
-	"--expt-relaxed-constexpr",
-	# The following definitions must be undefined
-	# since TCNN requires half-precision operation.
-	"-U__CUDA_NO_HALF_OPERATORS__",
-	"-U__CUDA_NO_HALF_CONVERSIONS__",
-	"-U__CUDA_NO_HALF2_OPERATORS__",
+	"-fPIC",
+	"-O3",
+	f"--rocm-path={ROCM_PATH}",
+] + arch_flags + [
+	"-D__HIP_PLATFORM_AMD__",
+	"-DUSE_ROCM",
+	"-UHIPBLAS_V2",
+	"-Wno-float-conversion",
+	"-fno-strict-aliasing",
+	"-fno-gpu-rdc",
+	"-munsafe-fp-atomics",
 ]
 
-if os.name == "posix":
-	base_cflags = [f"-std=c++{cpp_standard}"]
-	base_nvcc_flags += [
-		"-Xcompiler=-Wno-float-conversion",
-		"-Xcompiler=-fno-strict-aliasing",
-	]
-elif os.name == "nt":
-	base_cflags = [f"/std:c++{cpp_standard}"]
-
-
-# Some containers set this to contain old architectures that won't compile. We only need the one installed in the machine.
 os.environ["TORCH_CUDA_ARCH_LIST"] = ""
 
-# List of sources.
+# ---------------------------------------------------------------------------
+# Source files & definitions
+# ---------------------------------------------------------------------------
 bindings_dir = os.path.dirname(__file__)
 root_dir = os.path.abspath(os.path.join(bindings_dir, "../.."))
 
 base_definitions = [
-	# PyTorch-supplied parameters may be unaligned. TCNN must be made aware of this such that
-	# it does not optimize for aligned memory accesses.
 	"-DTCNN_PARAMS_UNALIGNED",
+	"-DTCNN_MIN_GPU_ARCH=75",
 ]
 
 base_source_files = [
 	"tinycudann/bindings.cpp",
 	"../../dependencies/fmt/src/format.cc",
 	"../../dependencies/fmt/src/os.cc",
-	"../../src/cpp_api.cu",
-	"../../src/common_host.cu",
-	"../../src/encoding.cu",
-	"../../src/object.cu",
+	"../../src/cpp_api.cpp",
+	"../../src/common_host.cpp",
+	"../../src/encoding.cpp",
+	"../../src/object.cpp",
 ]
 
 if include_networks:
 	base_source_files += [
-		"../../src/network.cu",
-		"../../src/cutlass_mlp.cu",
+		"../../src/network.cpp",
+		"../../src/fully_fused_mlp.cpp",
 	]
 else:
 	base_definitions.append("-DTCNN_NO_NETWORKS")
 
-def make_extension(compute_capability):
-	nvcc_flags = base_nvcc_flags + [f"-gencode=arch=compute_{compute_capability},code={code}_{compute_capability}" for code in ["compute", "sm"]]
-	definitions = base_definitions + [f"-DTCNN_MIN_GPU_ARCH={compute_capability}"]
+# ---------------------------------------------------------------------------
+# Extension
+# ---------------------------------------------------------------------------
+rocm_include = os.path.join(ROCM_PATH, "include")
+cflags = base_cflags + base_definitions
 
-	if include_networks and compute_capability > 70:
-		source_files = base_source_files + ["../../src/fully_fused_mlp.cu"]
-	else:
-		source_files = base_source_files
+ext = CppExtension(
+	name="tinycudann_bindings._75_C",
+	sources=base_source_files,
+	include_dirs=[
+		f"{root_dir}/include",
+		f"{root_dir}/dependencies",
+		f"{root_dir}/dependencies/fmt/include",
+		rocm_include,
+		os.path.join(rocm_include, "rocwmma"),
+		os.path.join(rocm_include, "hipblas"),
+		os.path.join(rocm_include, "rocblas"),
+	],
+	extra_compile_args={"cxx": cflags},
+	libraries=["amdhip64", "hipblas", "rocblas"],
+	library_dirs=[os.path.join(ROCM_PATH, "lib")],
+)
 
-	nvcc_flags = nvcc_flags + definitions
-	cflags = base_cflags + definitions
-
-	ext = CUDAExtension(
-		name=f"tinycudann_bindings._{compute_capability}_C",
-		sources=source_files,
-		include_dirs=[
-			f"{root_dir}/include",
-			f"{root_dir}/dependencies",
-			f"{root_dir}/dependencies/cutlass/include",
-			f"{root_dir}/dependencies/cutlass/tools/util/include",
-			f"{root_dir}/dependencies/fmt/include",
-		],
-		extra_compile_args={"cxx": cflags, "nvcc": nvcc_flags},
-		libraries=["cuda"],
-	)
-	return ext
-
-ext_modules = [make_extension(comp) for comp in compute_capabilities]
-
+# ---------------------------------------------------------------------------
+# Package
+# ---------------------------------------------------------------------------
 setup(
 	name="tinycudann",
 	version=VERSION,
-	description="tiny-cuda-nn extension for PyTorch",
-	long_description="tiny-cuda-nn extension for PyTorch",
+	description="tiny-rocm-nn extension for PyTorch (ROCm/HIP)",
+	long_description="tiny-rocm-nn extension for PyTorch (ROCm/HIP)",
 	classifiers=[
 		"Development Status :: 4 - Beta",
-		"Environment :: GPU :: NVIDIA CUDA",
+		"Environment :: GPU :: AMD ROCm",
 		"License :: BSD 3-Clause",
 		"Programming Language :: C++",
-		"Programming Language :: CUDA",
 		"Programming Language :: Python :: 3 :: Only",
 		"Topic :: Multimedia :: Graphics",
 		"Topic :: Scientific/Engineering :: Artificial Intelligence",
 		"Topic :: Scientific/Engineering :: Image Processing",
 	],
-	keywords="PyTorch,cutlass,machine learning",
+	keywords="PyTorch,ROCm,HIP,rocwmma,machine learning",
 	url="https://github.com/nvlabs/tiny-cuda-nn",
 	author="Thomas Müller, Jacob Munkberg, Jon Hasselgren, Or Perel",
 	author_email="tmueller@nvidia.com, jmunkberg@nvidia.com, jhasselgren@nvidia.com, operel@nvidia.com",
 	maintainer="Thomas Müller",
 	maintainer_email="tmueller@nvidia.com",
-	download_url=f"https://github.com/nvlabs/tiny-cuda-nn",
+	download_url="https://github.com/nvlabs/tiny-cuda-nn",
 	license="BSD 3-Clause \"New\" or \"Revised\" License",
 	packages=["tinycudann"],
 	install_requires=[],
 	include_package_data=True,
 	zip_safe=False,
-	ext_modules=ext_modules,
-	cmdclass={"build_ext": BuildExtension}
+	ext_modules=[ext],
+	cmdclass={"build_ext": BuildExtension},
 )
