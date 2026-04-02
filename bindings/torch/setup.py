@@ -74,11 +74,17 @@ print(f"Targeting C++ standard {cpp_standard}")
 # ---------------------------------------------------------------------------
 # Compiler flags (hipcc handles -x hip internally)
 # ---------------------------------------------------------------------------
+arch_flags = []
+for arch in rocm_arch.replace(",", ";").split(";"):
+	arch = arch.strip()
+	if arch:
+		arch_flags.append(f"--offload-arch={arch}")
+
 base_cflags = [
 	f"-std=c++{cpp_standard}",
 	"-fPIC",
 	"-O3",
-	f"--offload-arch={rocm_arch}",
+] + arch_flags + [
 	"-D__HIP_PLATFORM_AMD__",
 	"-DUSE_ROCM",
 	"-UHIPBLAS_V2",
