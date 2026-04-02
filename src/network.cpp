@@ -81,11 +81,14 @@ uint32_t minimum_alignment(const json& network) {
 	if (equals_case_insensitive(network_type, "FullyFusedMLP")) {
 #if TCNN_MIN_GPU_ARCH > 70
 		uint32_t n_neurons = network.value("n_neurons", 128u);
+		// Return the network width so encoding output is padded to match.
+		// The fused backward kernel's dL_dinput path requires input_width == WIDTH;
+		// the fc_multiply fallback for mismatched widths has issues on ROCm/hipBLAS.
 		switch (n_neurons) {
-			case  16: return FullyFusedMLP<network_precision_t,  16>::REQUIRED_ALIGNMENT();
-			case  32: return FullyFusedMLP<network_precision_t,  32>::REQUIRED_ALIGNMENT();
-			case  64: return FullyFusedMLP<network_precision_t,  64>::REQUIRED_ALIGNMENT();
-			case 128: return FullyFusedMLP<network_precision_t, 128>::REQUIRED_ALIGNMENT();
+			case  16: return 16;
+			case  32: return 32;
+			case  64: return 64;
+			case 128: return 128;
 			default: throw std::runtime_error{fmt::format("FullyFusedMLP only supports 16, 32, 64, and 128 neurons, but got {}.", n_neurons)};
 		}
 #else
