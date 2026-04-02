@@ -4,6 +4,17 @@ import sys
 import torch
 from torch.utils.cpp_extension import BuildExtension, CppExtension
 
+
+class ROCmBuildExtension(BuildExtension):
+	"""BuildExtension subclass that skips the ABI check.
+
+	ROCm's clang++ reports version '19.0.0git' which PyTorch's version
+	parser cannot handle (int('0git') fails). The ABI check is only
+	relevant for GCC<5 vs libstdc++ compatibility and not needed here.
+	"""
+	def _check_abi(self):
+		return "clang", (19, 0, 0)
+
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 ROOT_DIR = os.path.dirname(os.path.dirname(SCRIPT_DIR))
 
@@ -152,5 +163,5 @@ setup(
 	include_package_data=True,
 	zip_safe=False,
 	ext_modules=[ext],
-	cmdclass={"build_ext": BuildExtension},
+	cmdclass={"build_ext": ROCmBuildExtension},
 )
