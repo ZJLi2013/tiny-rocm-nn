@@ -84,6 +84,7 @@ base_cflags = [
 	f"-std=c++{cpp_standard}",
 	"-fPIC",
 	"-O3",
+	f"--rocm-path={ROCM_PATH}",
 ] + arch_flags + [
 	"-D__HIP_PLATFORM_AMD__",
 	"-DUSE_ROCM",
